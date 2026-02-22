@@ -1,0 +1,111 @@
+name: Publish Docker images
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  release:
+    types: [published]
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: ekillingbeck/cosmx-utilities
+
+jobs:
+  build_and_test:
+    name: Build and smoke-test Docker images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build headless image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: headless
+          push: false
+          load: true
+          tags: cosmx-utilities:headless-test
+          cache-from: type=gha,scope=headless
+          cache-to: type=gha,mode=max,scope=headless
+
+      - name: Build GUI image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: gui
+          push: false
+          load: true
+          tags: cosmx-utilities:gui-test
+          cache-from: type=gha,scope=gui
+          cache-to: type=gha,mode=max,scope=gui
+
+      - name: Run smoke tests
+        run: ./util/smoke-test.sh
+
+  push_to_registry:
+    name: Push Docker images to Docker Hub
+    runs-on: ubuntu-latest
+    needs: build_and_test
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v5
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha
+
+      - name: Build and push headless image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: headless
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:headless-latest
+            ${{ env.IMAGE_NAME }}:headless-${{ github.sha }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=headless
+          cache-to: type=gha,mode=max,scope=headless
+
+      - name: Build and push GUI image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: gui
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:gui-latest
+            ${{ env.IMAGE_NAME }}:gui-${{ github.sha }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=gui
+          cache-to: type=gha,mode=max,scope=gui
