@@ -1,0 +1,11 @@
+name: napari-cosmx-fork
+display_name: napari CosMx Fork
+contributions:
+  commands:
+    - id: napari-cosmx-fork.get_reader
+      python_name: napari_cosmx._reader:napari_get_reader
+      title: Open data with napari CosMx Fork
+  readers:
+    - command: napari-cosmx-fork.get_reader
+      filename_patterns: ['*']
+      accepts_directories: true
