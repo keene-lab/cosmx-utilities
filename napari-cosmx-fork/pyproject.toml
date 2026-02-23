@@ -1,0 +1,110 @@
+[project]
+name = "napari-cosmx-fork"
+version = "0.4.17.4"
+description = "View CosMx images and data in napari"
+readme = "README.md"
+requires-python = ">=3.8,<3.11"
+license = {text = "Bruker Spatial Biology Software License Agreement for Non-Commercial Use"}
+authors = [
+    {name = "Bruker Spatial Biology", email = "Evelyn.Metzger@bruker.com"}
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Framework :: napari",
+    "Topic :: Software Development :: Testing",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    # Core dependencies for CLI tools (headless)
+    "numpy",
+    "pandas",
+    "anndata",
+    "vaex-core",
+    "vaex-hdf5",
+    "tifffile",
+    "tqdm",
+    "zarr",
+    "imagecodecs",
+    "scikit-learn",
+    "distributed",
+]
+
+[project.optional-dependencies]
+# GUI dependencies - install with: pip install napari-cosmx-fork[gui]
+gui = [
+    "napari[pyqt6]",  # PyQt6 has better macOS ARM support than PyQt5
+]
+dev = [
+    "linkify-it-py",
+    "myst-parser",
+    "nbsphinx>=0.8.1,<0.8.7",
+    "sphinx>=5.1.1",
+    "sphinx-argparse-cli",
+    "sphinx-rtd-theme==1.2.2",
+    "sphinx-copybutton",
+    "sphinx-design",
+    "sphinx-tabs",
+    "sphinx-gallery==0.8.2",
+    "Sphinx-Substitution-Extensions",
+    "PySide2",
+    "datashader",
+    "pytest-cov",
+    "pytest-qt",
+    "pytest>=7.0.0",
+]
+docs = [
+    "linkify-it-py",
+    "myst-parser",
+    "nbsphinx>=0.8.1,<0.8.7",
+    "sphinx>=5.1.1",
+    "sphinx-argparse-cli",
+    "sphinx-rtd-theme==1.2.2",
+    "sphinx-copybutton",
+    "sphinx-design",
+    "sphinx-tabs",
+    "sphinx-gallery==0.8.2",
+    "Sphinx-Substitution-Extensions",
+    "PySide2",
+    "datashader",
+]
+testing = [
+    "pytest-cov",
+    "pytest-qt",
+    "pytest>=7.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Nanostring-Biostats/napari-CosMx"
+"Bug Tracker" = "https://github.com/Nanostring-Biostats/napari-CosMx/issues"
+Documentation = "https://github.com/Nanostring-Biostats/napari-CosMx#README.md"
+"Source Code" = "https://github.com/Nanostring-Biostats/napari-CosMx"
+"User Support" = "https://github.com/Nanostring-Biostats/napari-CosMx/issues"
+
+[project.scripts]
+create-anndata = "napari_cosmx.utils.create_anndata:main"
+create-ome-ngff = "napari_cosmx.utils.create_ome_zarr:main"
+export-tiff = "napari_cosmx.utils.export_tiff:main"
+load-images = "napari_cosmx.utils.load_images:main"
+read-targets = "napari_cosmx.utils.read_targets:main"
+stitch-composite = "napari_cosmx.utils.stitch_composite:main"
+stitch-encoded = "napari_cosmx.utils.stitch_encoded:main"
+stitch-expression = "napari_cosmx.utils.stitch_expression:main"
+stitch-fovgrid = "napari_cosmx.utils.stitch_fovgrid:main"
+stitch-images = "napari_cosmx.utils.stitch_images:main"
+stitch-targets = "napari_cosmx.utils.stitch_targets:main"
+
+[project.entry-points."napari.manifest"]
+napari-cosmx-fork = "napari_cosmx:napari.yaml"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/napari_cosmx"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

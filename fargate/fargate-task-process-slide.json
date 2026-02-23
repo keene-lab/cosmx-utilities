@@ -1,0 +1,43 @@
+{
+  "family": "cosmx-process-slide",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "4096",
+  "memory": "30720",
+  "ephemeralStorage": {
+    "sizeInGiB": 200
+  },
+  "taskRoleArn": "arn:aws:iam::ACCOUNT_ID:role/CosMxFargateProcessingRole",
+  "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ecsTaskExecutionRole",
+  "containerDefinitions": [
+    {
+      "name": "process-slide",
+      "image": "ekillingbeck/cosmx-utilities:headless-latest",
+      "essential": true,
+      "command": [
+        "uv", "run", "python",
+        "/app/scripts/process-slide.py",
+        "BUCKET_NAME",
+        "SLIDE_BASE_PATH"
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/cosmx-process-slide",
+          "awslogs-region": "us-west-2",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "environment": [
+        {
+          "name": "AWS_DEFAULT_REGION",
+          "value": "us-west-2"
+        },
+        {
+          "name": "NAPARI_HEADLESS",
+          "value": "1"
+        }
+      ]
+    }
+  ]
+}

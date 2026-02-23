@@ -1,0 +1,100 @@
+CellStatsDir/
+├── FOV00001/                                          # Original segmentation (v1)
+│   ├── CellLabels_F00001.tif                    1.1 MB   <-- stitch-images needs this
+│   ├── CellBoundaries_F00001.csv                306 KB
+│   ├── CellBoundaries_F00001_987.fz              33 KB
+│   ├── CellRegionLabels_F00001.tif              749 KB
+│   ├── CompartmentLabels_F00001.tif             1.2 MB
+│   ├── Run_*_Cell_Stats_F00001.csv              150 KB
+│   ├── Run_*_CellRegion_Stats_F00001.csv         41 KB
+│   └── Run_*_FOV00001__complete_code_cell_target_call_coord.csv  106 MB (!)
+├── FOV00002/
+│   └── ... (same structure)
+├── ...
+├── FOV00200/
+│   └── ... (same structure, x200 FOVs)
+│
+├── Morphology2D/                                      <-- stitch-images needs this
+│   ├── 20241205_230359_S3_C902_P99_N99_F00001.TIF  145 MB
+│   ├── 20241205_230359_S3_C902_P99_N99_F00002.TIF  157 MB
+│   └── ... (x200 FOVs, ~150 MB each)
+│
+├── CellOverlay/
+│
+├── Segmentation_3646ce20-...-af68e31092cc_001/        # Resegmentation v1
+│   ├── FOV00001/
+│   │   ├── CellLabels_F00001.tif                1.1 MB   <-- duplicate per version
+│   │   ├── CellBoundaries_F00001.csv            306 KB
+│   │   ├── CompartmentLabels_F00001.tif         1.2 MB
+│   │   ├── Run_*_Cell_Stats_F00001.csv          150 KB
+│   │   └── Run_*_FOV00001__complete_code_cell_target_call_coord.csv  106 MB (!)
+│   ├── FOV00002/
+│   │   └── ...
+│   ├── ...
+│   ├── FOV00200/
+│   │   └── ...
+│   ├── CellOverlay/
+│   ├── SegmentationManifest_Files_..._001.json
+│   └── SegmentationManifest_Parameters_..._001.json   <-- Version: 1
+│
+├── Segmentation_6c39e80e-...-f03f12c43e15_002/        # Resegmentation v2
+│   ├── FOV00001/
+│   │   └── ... (same as above)
+│   ├── ...
+│   ├── FOV00200/
+│   ├── SegmentationManifest_Files_..._002.json
+│   └── SegmentationManifest_Parameters_..._002.json   <-- Version: 2
+│
+└── Segmentation_12d18c13-...-24d6c24703d5_003/        # Resegmentation v3 (LATEST)
+    ├── FOV00001/
+    │   └── ... (same as above)
+    ├── ...
+    ├── FOV00200/
+    ├── SegmentationManifest_Files_..._003.json
+    └── SegmentationManifest_Parameters_..._003.json   <-- Version: 3
+
+
+THE PROBLEM:
+────────────────────────────────────────────────────────────────────────────────
+
+  A blanket `aws s3 sync CellStatsDir/` downloads ALL of the above.
+  For this slide that means:
+
+  Base FOVs:              200 FOVs x ~108 MB each  =  ~21 GB
+  Segmentation_..._001:   200 FOVs x ~108 MB each  =  ~21 GB
+  Segmentation_..._002:   200 FOVs x ~108 MB each  =  ~21 GB
+  Segmentation_..._003:   200 FOVs x ~108 MB each  =  ~21 GB
+  Morphology2D:           200 FOVs x ~150 MB each  =  ~30 GB
+                                                    ─────────
+                                              TOTAL:  ~114 GB
+
+  But stitch-images only needs:
+
+  Base CellLabels:        200 x 1.1 MB             =   220 MB
+  Seg v3 CellLabels:      200 x 1.1 MB             =   220 MB
+  Morphology2D:           200 x 150 MB              =   ~30 GB
+                                                    ─────────
+                                              TOTAL:   ~30 GB
+
+  SAVINGS: ~84 GB per slide (74% reduction)
+
+
+THE FIX:
+────────────────────────────────────────────────────────────────────────────────
+
+  1. Query manifest JSONs in S3 via DuckDB (no download):
+
+     SELECT regexp_extract(filename, '(Segmentation_[^/]+)', 1) AS seg_dir
+     FROM read_json_auto('s3://.../CellStatsDir/Segmentation_*/SegmentationManifest_Parameters_*.json')
+     ORDER BY Version DESC LIMIT 1;
+
+     --> Segmentation_12d18c13-...-24d6c24703d5_003
+
+  2. Targeted sync — only download what stitch-images needs:
+
+     aws s3 sync ... --exclude "*" \
+       --include "FOV*/CellLabels_F*.tif" \
+       --include "Morphology2D/*.TIF"
+
+     aws s3 sync ... --exclude "*" \
+       --include "Segmentation_12d18c13-..._003/FOV*/CellLabels_F*.tif"
