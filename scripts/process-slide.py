@@ -507,6 +507,28 @@ def upload_results(ctx: SlideContext) -> None:
     )
 
 
+def _write_status_marker(ctx: SlideContext, success: bool) -> None:
+    """Write a zero-byte _SUCCESS or _FAILED marker to the S3 output prefix.
+
+    Removes the opposite marker first so only one exists at a time.
+    """
+    marker = "_SUCCESS" if success else "_FAILED"
+    stale = "_FAILED" if success else "_SUCCESS"
+    prefix = f"s3://{ctx.bucket}/{ctx.output_prefix}"
+
+    # Remove the opposite marker if it exists from a previous run
+    try:
+        s3_run(["s3", "rm", f"{prefix}/{stale}"], quiet=True)
+    except subprocess.CalledProcessError:
+        pass  # marker didn't exist
+
+    # Write zero-byte marker
+    marker_path = ctx.work_dir / marker
+    marker_path.touch()
+    s3_run(["s3", "cp", str(marker_path), f"{prefix}/{marker}"], quiet=True)
+    log(f"  Status marker: {prefix}/{marker}")
+
+
 # ── Main ────────────────────────────────────────────────────────────────────
 
 
@@ -595,9 +617,13 @@ def process_slide(
     except Exception:
         log(f"\n=== FAILED at step: {bench.failed_step or 'unknown'} ===")
         bench.write_and_upload()
+        if not whatif:
+            _write_status_marker(ctx, success=False)
         raise
 
     bench.write_and_upload()
+    if not whatif:
+        _write_status_marker(ctx, success=True)
 
     download_start, _ = bench._timings["download"]
     _, upload_end = bench._timings["upload"]
