@@ -2,7 +2,7 @@
 
 A scalable, end-to-end pipeline for processing [CosMx Spatial Molecular Imager](https://brukerspatialbiology.com/products/cosmx-spatial-molecular-imager/single-cell-imaging-overview/) data from the [BRaIN Lab](https://dlmp.uw.edu/research-labs/brainlab) at the University of Washington. 
 
-This pipeline automates the path from raw CosMx slide exports to interactive spatial visualization in [Napari](https://napari.org), using AWS cloud infrastructure for on-demand, cost-effective compute and a fork of [napari-cosmx](https://nanostring-biostats.github.io/CosMx-Analysis-Scratch-Space/posts/napari-cosmx-intro/) for headless image processing and data exploration.
+This pipeline automates the workflow for converting raw CosMx slide exports to interactive spatial visualization in [Napari](https://napari.org), using AWS cloud infrastructure for on-demand, cost-effective compute and a fork of [napari-cosmx](https://nanostring-biostats.github.io/CosMx-Analysis-Scratch-Space/posts/napari-cosmx-intro/) for headless image processing and data exploration.
 
 ## Pipeline overview
 
@@ -125,7 +125,7 @@ The multi-stage Dockerfile produces two image variants:
 # Headless: CLI tools + AWS CLI for Fargate batch processing
 docker build --target headless -t cosmx-utilities:headless .
 
-# GUI: Full napari with Qt for desktop/HPC visualization
+# GUI: Full Napari with Qt for interactive visualization
 docker build --target gui -t cosmx-utilities:gui .
 ```
 
@@ -135,6 +135,6 @@ Fargate task definitions, IAM roles, and networking configuration are documented
 
 ## Future directions
 
-We will adapt our pipeline for the University of Washington's Hyak HPC cluster (Klone), leveraging GPU resources to reshape per-slide expression data for cell typing and batch correction using GPU-enabled libraries such as ScaleSC and scvi-tools. Workflow will include converting Docker containers to Apptainer images, using Slurm for batch scheduling, and providing interactive Napari sessions via Open OnDemand.
+We will adapt our pipeline for the University of Washington's Hyak HPC cluster ([Klone](https://hyak.uw.edu/docs/)), leveraging GPU resources to reshape per-slide expression data for cell typing and batch correction using GPU-enabled libraries such as [ScaleSC](https://github.com/interactivereport/ScaleSC) and [scvi-tools](https://scvi-tools.org). Workflow will include converting Docker containers to [Apptainer](https://apptainer.org/docs/user/main/) images, using [Slurm](https://slurm.schedmd.com/overview.html) for batch scheduling, and providing interactive Napari sessions via [Open OnDemand](https://www.openondemand.org).
 
 Pipeline tools, Fargate infrastructure templates, and napari-cosmx-fork are publicly available in this repository and on [Docker Hub](https://hub.docker.com/r/ekillingbeck/cosmx-utilities).
