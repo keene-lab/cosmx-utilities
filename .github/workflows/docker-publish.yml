@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - fix/segmentation-detection
     tags:
       - 'v*'
   release:
