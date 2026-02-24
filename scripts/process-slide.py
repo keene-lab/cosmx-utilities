@@ -276,8 +276,64 @@ def _duckdb_create_s3_secret(con: "duckdb.DuckDBPyConnection") -> None:
 # ── Step 0: Detect segmentation version ────────────────────────────────────
 
 
-def detect_segmentation(ctx: SlideContext) -> tuple[str, str]:
-    """Query S3 manifest JSONs via DuckDB to find the highest segmentation version.
+def _read_seg_id_from_flatfiles(ctx: SlideContext) -> str:
+    """Read the cellSegmentationSetId from this AtoMx run's flatFiles metadata.
+
+    Downloads the first row of the run's metadata CSV to extract the
+    segmentation UUID that was used for this specific AtoMx run's analysis.
+    Returns the UUID string, or "" if not found.
+    """
+    import csv
+    import gzip
+    import tempfile
+
+    s3_key = (
+        f"{ctx.experiment_prefix}/{ctx.atomx_run}"
+        f"/flatFiles/{ctx.slide_name}/{ctx.slide_name}_metadata_file.csv.gz"
+    )
+    s3_uri = f"s3://{ctx.bucket}/{s3_key}"
+
+    with tempfile.NamedTemporaryFile(suffix=".csv.gz", delete=False) as tmp:
+        tmp_path = tmp.name
+
+    try:
+        result = subprocess.run(
+            ["aws", "s3", "cp", s3_uri, tmp_path, "--quiet"],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            log(f"  WARNING: Could not download {s3_uri}")
+            return ""
+
+        with gzip.open(tmp_path, "rt") as f:
+            reader = csv.DictReader(f)
+            row = next(reader, None)
+            if row:
+                return row.get("cellSegmentationSetId", "").strip()
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+    return ""
+
+
+def _find_seg_subdir_by_uuid(ctx: SlideContext, seg_id: str) -> str:
+    """Find the Segmentation_* subdirectory in CellStatsDir matching a UUID.
+
+    Queries S3 for Segmentation_* prefixes and returns the one whose name
+    contains the given UUID. Returns "" if no match.
+    """
+    seg_dirs = s3_ls_prefixes(
+        ctx.bucket,
+        f"{ctx.slide_base_path}/CellStatsDir",
+    )
+    for dirname in seg_dirs:
+        if seg_id in dirname:
+            return dirname
+    return ""
+
+
+def _detect_highest_version(ctx: SlideContext) -> tuple[str, str]:
+    """Fallback: query S3 manifest JSONs via DuckDB to find the highest version.
 
     Returns (celllabels_subdir, seg_uuid) or ("", "") if none found.
     """
@@ -312,6 +368,33 @@ def detect_segmentation(ctx: SlideContext) -> tuple[str, str]:
         print(f"WARNING: DuckDB manifest query failed: {e}", file=sys.stderr)
 
     return "", ""
+
+
+def detect_segmentation(ctx: SlideContext) -> tuple[str, str]:
+    """Detect the correct segmentation version for this AtoMx run.
+
+    Strategy: read cellSegmentationSetId from the AtoMx run's own flatFiles
+    metadata, then find the matching Segmentation_* subdirectory in
+    CellStatsDir. This ensures each run uses its own segmentation version
+    when multiple resegmentations exist.
+
+    Falls back to picking the highest version from manifest JSONs if the
+    flatFiles lookup fails.
+
+    Returns (celllabels_subdir, seg_uuid) or ("", "") if none found.
+    """
+    # Primary: match via flatFiles cellSegmentationSetId
+    seg_id = _read_seg_id_from_flatfiles(ctx)
+    if seg_id:
+        log(f"  flatFiles cellSegmentationSetId: {seg_id}")
+        subdir = _find_seg_subdir_by_uuid(ctx, seg_id)
+        if subdir:
+            return subdir, seg_id
+        log(f"  WARNING: No CellStatsDir subdir matches UUID {seg_id}, "
+            "falling back to highest version")
+
+    # Fallback: highest version from manifest JSONs
+    return _detect_highest_version(ctx)
 
 
 # ── Step 1: Download slide data ────────────────────────────────────────────
