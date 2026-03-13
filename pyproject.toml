@@ -17,6 +17,11 @@ dependencies = [
     "zarr>=2.16.1",
     "napari-cosmx-fork",
     "python-dotenv>=1.0.1",
+    "jupyterlab>=4.3.8",
+    "polars>=1.8.2",
+    "pyarrow>=17.0.0",
+    "matplotlib>=3.7.5",
+    "seaborn>=0.13.2",
 ]
 
 [project.optional-dependencies]
