@@ -1,0 +1,142 @@
+#!/bin/bash
+# Cloud-init user-data script for the CosMx analytics AMI.
+# Installs R, RStudio, DCV, UV, Python environments, and Jupyter.
+# Run by create_ami.py as user-data on a temporary builder instance.
+set -euxo pipefail
+
+exec > >(tee /var/log/ami-setup.log) 2>&1
+echo "=== AMI setup started at $(date -u) ==="
+
+export DEBIAN_FRONTEND=noninteractive
+
+# ── System packages ──────────────────────────────────────────────────────
+apt-get update && apt-get upgrade -y
+apt-get install -y --no-install-recommends \
+    curl wget git unzip tmux \
+    build-essential \
+    software-properties-common \
+    libcurl4-openssl-dev libssl-dev libxml2-dev \
+    awscli
+
+# ── Desktop environment (lightweight, for DCV) ──────────────────────────
+apt-get install -y --no-install-recommends \
+    xfce4 xfce4-terminal \
+    xserver-xorg-video-dummy \
+    xfonts-base \
+    desktop-file-utils \
+    mesa-utils \
+    dbus-x11
+
+# ── R from Ubuntu repos (pre-built binaries, fast) ──────────────────────
+apt-get install -y --no-install-recommends \
+    r-base \
+    r-cran-ggplot2 \
+    r-cran-dplyr \
+    r-cran-reticulate \
+    r-cran-remotes
+
+# insitutype is the only package requiring a GitHub install
+Rscript -e 'remotes::install_github("Nanostring-Biostats/insitutype")'
+
+# ── RStudio Server ──────────────────────────────────────────────────────
+RSTUDIO_VERSION="2024.12.1-563"
+wget -q "https://download2.rstudio.org/server/jammy/amd64/rstudio-server-${RSTUDIO_VERSION}-amd64.deb"
+apt-get install -y "./rstudio-server-${RSTUDIO_VERSION}-amd64.deb" || {
+    apt-get --fix-broken install -y
+    dpkg -i "rstudio-server-${RSTUDIO_VERSION}-amd64.deb"
+}
+rm -f rstudio-server-*.deb
+systemctl enable rstudio-server
+
+# ── NICE DCV (software rendering, no GPU) ───────────────────────────────
+cd /tmp
+OS_VERSION=$(. /etc/os-release; echo "$VERSION_ID" | sed 's/\\.//g')
+ARCH=$(arch)
+DCV_TGZ="nice-dcv-ubuntu${OS_VERSION}-${ARCH}.tgz"
+
+wget -q "https://d1uj6qtbmh3dt5.cloudfront.net/${DCV_TGZ}" || {
+    echo "DCV package for Ubuntu ${OS_VERSION} not found, trying 2204 fallback..."
+    DCV_TGZ="nice-dcv-ubuntu2204-${ARCH}.tgz"
+    wget -q "https://d1uj6qtbmh3dt5.cloudfront.net/${DCV_TGZ}"
+}
+
+tar xzf "$DCV_TGZ"
+cd nice-dcv-*-"${ARCH}"
+apt-get install -y ./nice-dcv-server_*.deb ./nice-dcv-web-viewer_*.deb
+cd /tmp && rm -rf nice-dcv-* "$DCV_TGZ"
+
+# Configure DCV for automatic console session with software rendering
+cat > /etc/dcv/dcv.conf << 'DCVCONF'
+[display]
+target-fps = 30
+
+[session-management]
+create-session = true
+
+[session-management/automatic-console-session]
+owner = "ubuntu"
+storage-root = "%home%"
+
+[connectivity]
+web-port = 8443
+DCVCONF
+
+# Virtual display for software rendering (no GPU)
+cat > /etc/X11/xorg.conf << 'XORGCONF'
+Section "Device"
+    Identifier "DummyDevice"
+    Driver "dummy"
+    Option "UseEDID" "false"
+    VideoRam 512000
+EndSection
+
+Section "Monitor"
+    Identifier "DummyMonitor"
+    HorizSync   5.0 - 1000.0
+    VertRefresh 5.0 - 200.0
+    Option "ReducedBlanking"
+EndSection
+
+Section "Screen"
+    Identifier "DummyScreen"
+    Device "DummyDevice"
+    Monitor "DummyMonitor"
+    DefaultDepth 24
+    SubSection "Display"
+        Viewport 0 0
+        Depth 24
+        Virtual 3840 2160
+    EndSubSection
+EndSection
+XORGCONF
+
+systemctl set-default graphical.target
+systemctl enable dcvserver
+
+# ── UV (Python package manager) ─────────────────────────────────────────
+curl -LsSf https://astral.sh/uv/install.sh | sh
+cp /root/.local/bin/uv /usr/local/bin/uv
+cp /root/.local/bin/uvx /usr/local/bin/uvx
+
+# ── Clone repo and install Python environments ──────────────────────────
+REPO_DIR="/opt/cosmx-utilities"
+git clone https://github.com/keene-lab/cosmx-utilities.git "$REPO_DIR"
+chown -R ubuntu:ubuntu "$REPO_DIR"
+
+# Main workspace (napari-cosmx-fork + pipeline tools) — requires Python <3.11
+cd "$REPO_DIR"
+sudo -u ubuntu uv python install 3.10
+sudo -u ubuntu uv sync --python 3.10
+
+# Analytics environment (Jupyter + Polars) — uses latest Python
+cd "$REPO_DIR/ec2/analytics"
+sudo -u ubuntu uv sync
+
+# ── Default mount point for data ────────────────────────────────────────
+mkdir -p /mnt/cosmx
+chown ubuntu:ubuntu /mnt/cosmx
+
+# ── Sentinel: signal setup completion ────────────────────────────────────
+touch /var/lib/cloud/instance/ami-setup-complete
+echo "=== AMI_SETUP_COMPLETE ==="
+echo "=== AMI setup finished at $(date -u) ==="
