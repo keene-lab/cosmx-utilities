@@ -1,11 +1,11 @@
 """Shared utilities for EC2 analytics scripts."""
 
-import json
 import os
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+import boto3
 
 EC2_DIR = Path(__file__).resolve().parent
 ENV_PATH = EC2_DIR / ".env"
@@ -28,16 +28,6 @@ def log(msg: str) -> None:
     print(f"[{ts}] {msg}")
 
 
-def aws(*args: str, parse_json: bool = False) -> subprocess.CompletedProcess | dict:
-    """Run an AWS CLI command. If parse_json=True, return parsed JSON output."""
-    cmd = ["aws"] + list(args)
-    if parse_json:
-        cmd += ["--output", "json"]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"AWS CLI error: {' '.join(cmd)}", file=sys.stderr)
-        print(result.stderr, file=sys.stderr)
-        sys.exit(1)
-    if parse_json:
-        return json.loads(result.stdout)
-    return result
+def boto_session(region: str) -> boto3.Session:
+    """Create a boto3 session using the current AWS CLI credentials."""
+    return boto3.Session(region_name=region)

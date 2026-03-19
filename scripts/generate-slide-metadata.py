@@ -24,46 +24,41 @@ import argparse
 import csv
 import gzip
 import os
-import subprocess
 import sys
 import tempfile
 
+import boto3
 import duckdb
+from botocore.exceptions import ClientError
 
 
-def s3_ls_prefixes(bucket: str, prefix: str) -> list[str]:
+def s3_ls_prefixes(s3, bucket: str, prefix: str) -> list[str]:
     """List immediate subdirectory prefixes under an S3 path."""
-    uri = f"s3://{bucket}/{prefix}/"
-    result = subprocess.run(
-        ["aws", "s3", "ls", uri],
-        capture_output=True, text=True,
+    response = s3.list_objects_v2(
+        Bucket=bucket, Prefix=prefix.rstrip("/") + "/", Delimiter="/",
     )
-    if result.returncode != 0:
-        return []
-    dirs = []
-    for line in result.stdout.strip().splitlines():
-        line = line.strip()
-        if line.startswith("PRE "):
-            dirs.append(line[4:].rstrip("/"))
-    return dirs
+    return [
+        p["Prefix"].rstrip("/").rsplit("/", 1)[-1]
+        for p in response.get("CommonPrefixes", [])
+    ]
 
 
-def s3_file_exists(bucket: str, key: str) -> bool:
+def s3_file_exists(s3, bucket: str, key: str) -> bool:
     """Check if an S3 object exists."""
-    result = subprocess.run(
-        ["aws", "s3", "ls", f"s3://{bucket}/{key}"],
-        capture_output=True, text=True,
-    )
-    return result.returncode == 0 and result.stdout.strip() != ""
+    try:
+        s3.head_object(Bucket=bucket, Key=key)
+        return True
+    except ClientError:
+        return False
 
 
-def s3_download(bucket: str, key: str, local_path: str) -> bool:
+def s3_download(s3, bucket: str, key: str, local_path: str) -> bool:
     """Download an S3 object to a local path. Returns True on success."""
-    result = subprocess.run(
-        ["aws", "s3", "cp", f"s3://{bucket}/{key}", local_path, "--quiet"],
-        capture_output=True, text=True,
-    )
-    return result.returncode == 0
+    try:
+        s3.download_file(bucket, key, local_path)
+        return True
+    except ClientError:
+        return False
 
 
 def deterministic_color(value: str) -> str:
@@ -76,17 +71,17 @@ def deterministic_color(value: str) -> str:
 
 
 def find_metadata_file(
-    bucket: str, experiment_prefix: str, slide_name: str
+    s3, bucket: str, experiment_prefix: str, slide_name: str
 ) -> list[tuple[str, str]]:
     """Find all metadata files for a slide across all AtoMx runs.
 
     Returns list of (atomx_run_name, s3_key) tuples.
     """
-    atomx_runs = s3_ls_prefixes(bucket, experiment_prefix)
+    atomx_runs = s3_ls_prefixes(s3, bucket, experiment_prefix)
     results = []
     for run in atomx_runs:
         key = f"{experiment_prefix}/{run}/flatFiles/{slide_name}/{slide_name}_metadata_file.csv.gz"
-        if s3_file_exists(bucket, key):
+        if s3_file_exists(s3, bucket, key):
             results.append((run, key))
     return results
 
@@ -180,9 +175,11 @@ def main() -> None:
     print(f"  Seg ID:    {args.seg_id or '(all)'}")
     print(f"  Cell type: {args.cell_type_column}")
 
+    s3 = boto3.client("s3")
+
     # Find all metadata files for this slide
     sources = find_metadata_file(
-        args.bucket, args.experiment_prefix, args.slide_name,
+        s3, args.bucket, args.experiment_prefix, args.slide_name,
     )
 
     if not sources:
@@ -203,7 +200,7 @@ def main() -> None:
             # No filtering — use first source
             run_name, s3_key = sources[0]
             print(f"  Downloading from: {run_name}")
-            if not s3_download(args.bucket, s3_key, local_gz):
+            if not s3_download(s3, args.bucket, s3_key, local_gz):
                 print(f"ERROR: Failed to download s3://{args.bucket}/{s3_key}", file=sys.stderr)
                 sys.exit(1)
 
@@ -216,7 +213,7 @@ def main() -> None:
         # Try each source to find one containing the target seg ID
         for run_name, s3_key in sources:
             print(f"  Trying: {run_name} ...")
-            if not s3_download(args.bucket, s3_key, local_gz):
+            if not s3_download(s3, args.bucket, s3_key, local_gz):
                 print(f"    Download failed, skipping")
                 continue
 

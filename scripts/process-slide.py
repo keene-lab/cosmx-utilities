@@ -26,6 +26,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+import boto3
+from botocore.exceptions import ClientError
+
 
 # ── Path parsing ────────────────────────────────────────────────────────────
 
@@ -162,9 +165,10 @@ class Benchmark:
             log(f"  Benchmark (whatif, local):")
             log(csv_path.read_text())
         else:
-            s3_run(["s3", "cp", str(csv_path),
-                     f"s3://{self.ctx.bucket}/{self.ctx.output_prefix}/{bench_name}"],
-                    quiet=True)
+            _get_s3().upload_file(
+                str(csv_path), self.ctx.bucket,
+                f"{self.ctx.output_prefix}/{bench_name}",
+            )
             log(f"  Benchmark: s3://{self.ctx.bucket}/{self.ctx.output_prefix}/{bench_name}")
 
 
@@ -179,15 +183,18 @@ def log(msg: str) -> None:
     print(msg, flush=True)
 
 
+_s3 = None
+
+
+def _get_s3():
+    global _s3
+    if _s3 is None:
+        _s3 = boto3.client("s3")
+    return _s3
+
+
 def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, check=True, **kwargs)
-
-
-def s3_run(args: list[str], quiet: bool = False) -> subprocess.CompletedProcess:
-    cmd = ["aws"] + args
-    if quiet:
-        cmd.append("--quiet")
-    return run(cmd, capture_output=quiet)
 
 
 def s3_sync(
@@ -210,48 +217,34 @@ def s3_sync(
 
 def s3_ls_prefixes(bucket: str, prefix: str) -> list[str]:
     """List immediate subdirectory prefixes under an S3 path."""
-    result = subprocess.run(
-        ["aws", "s3", "ls", f"s3://{bucket}/{prefix}/"],
-        capture_output=True, text=True, check=True,
+    response = _get_s3().list_objects_v2(
+        Bucket=bucket, Prefix=prefix.rstrip("/") + "/", Delimiter="/",
     )
-    dirs = []
-    for line in result.stdout.strip().splitlines():
-        line = line.strip()
-        if line.startswith("PRE "):
-            dirs.append(line[4:].rstrip("/"))
-    return dirs
+    return [
+        p["Prefix"].rstrip("/").rsplit("/", 1)[-1]
+        for p in response.get("CommonPrefixes", [])
+    ]
 
 
 # ── DuckDB S3 credentials ───────────────────────────────────────────────────
 
 
 def _duckdb_create_s3_secret(con: "duckdb.DuckDBPyConnection") -> None:
-    """Configure DuckDB S3 access using AWS CLI credentials.
+    """Configure DuckDB S3 access using boto3-resolved credentials.
 
-    Resolves credentials the same way the AWS CLI does (env vars, SSO, profiles)
-    by calling `aws configure export-credentials`. This ensures DuckDB can access
-    S3 even when using SSO sessions that the credential_chain provider can't
-    auto-detect.
+    Resolves credentials through boto3's credential chain (env vars, SSO,
+    profiles, IAM role). This ensures DuckDB can access S3 even when using
+    SSO sessions that DuckDB's credential_chain provider can't auto-detect.
     """
-    result = subprocess.run(
-        ["aws", "configure", "export-credentials", "--format", "env"],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        # Fall back to env vars or Fargate task role (credential_chain)
+    session = boto3.Session()
+    credentials = session.get_credentials()
+    if credentials is None:
         con.sql("INSTALL httpfs; LOAD httpfs;")
         return
 
-    creds: dict[str, str] = {}
-    for line in result.stdout.strip().splitlines():
-        # Lines like: export AWS_ACCESS_KEY_ID=AKIA...
-        line = line.replace("export ", "").strip()
-        if "=" in line:
-            key, _, value = line.partition("=")
-            creds[key.strip()] = value.strip()
-
+    creds = credentials.get_frozen_credentials()
     region = (
-        creds.get("AWS_DEFAULT_REGION")
+        session.region_name
         or os.environ.get("AWS_DEFAULT_REGION")
         or os.environ.get("AWS_REGION", "us-west-2")
     )
@@ -260,13 +253,12 @@ def _duckdb_create_s3_secret(con: "duckdb.DuckDBPyConnection") -> None:
         CREATE OR REPLACE SECRET secret (
             TYPE s3,
             PROVIDER config,
-            KEY_ID '{creds["AWS_ACCESS_KEY_ID"]}',
-            SECRET '{creds["AWS_SECRET_ACCESS_KEY"]}',
+            KEY_ID '{creds.access_key}',
+            SECRET '{creds.secret_key}',
             REGION '{region}'
     """
-    session_token = creds.get("AWS_SESSION_TOKEN")
-    if session_token:
-        secret_sql += f",\n        SESSION_TOKEN '{session_token}'"
+    if creds.token:
+        secret_sql += f",\n        SESSION_TOKEN '{creds.token}'"
     secret_sql += "\n    );"
 
     con.sql("INSTALL httpfs; LOAD httpfs;")
@@ -291,18 +283,15 @@ def _read_seg_id_from_flatfiles(ctx: SlideContext) -> str:
         f"{ctx.experiment_prefix}/{ctx.atomx_run}"
         f"/flatFiles/{ctx.slide_name}/{ctx.slide_name}_metadata_file.csv.gz"
     )
-    s3_uri = f"s3://{ctx.bucket}/{s3_key}"
 
     with tempfile.NamedTemporaryFile(suffix=".csv.gz", delete=False) as tmp:
         tmp_path = tmp.name
 
     try:
-        result = subprocess.run(
-            ["aws", "s3", "cp", s3_uri, tmp_path, "--quiet"],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            log(f"  WARNING: Could not download {s3_uri}")
+        try:
+            _get_s3().download_file(ctx.bucket, s3_key, tmp_path)
+        except ClientError:
+            log(f"  WARNING: Could not download s3://{ctx.bucket}/{s3_key}")
             return ""
 
         with gzip.open(tmp_path, "rt") as f:
@@ -512,21 +501,18 @@ def _write_status_marker(ctx: SlideContext, success: bool) -> None:
 
     Removes the opposite marker first so only one exists at a time.
     """
+    s3 = _get_s3()
     marker = "_SUCCESS" if success else "_FAILED"
     stale = "_FAILED" if success else "_SUCCESS"
-    prefix = f"s3://{ctx.bucket}/{ctx.output_prefix}"
 
     # Remove the opposite marker if it exists from a previous run
-    try:
-        s3_run(["s3", "rm", f"{prefix}/{stale}"], quiet=True)
-    except subprocess.CalledProcessError:
-        pass  # marker didn't exist
+    s3.delete_object(Bucket=ctx.bucket, Key=f"{ctx.output_prefix}/{stale}")
 
     # Write zero-byte marker
     marker_path = ctx.work_dir / marker
     marker_path.touch()
-    s3_run(["s3", "cp", str(marker_path), f"{prefix}/{marker}"], quiet=True)
-    log(f"  Status marker: {prefix}/{marker}")
+    s3.upload_file(str(marker_path), ctx.bucket, f"{ctx.output_prefix}/{marker}")
+    log(f"  Status marker: s3://{ctx.bucket}/{ctx.output_prefix}/{marker}")
 
 
 # ── Main ────────────────────────────────────────────────────────────────────
