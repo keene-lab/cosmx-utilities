@@ -26,7 +26,6 @@ rm -rf /tmp/aws /tmp/awscliv2.zip
 # ── Desktop environment (lightweight, for DCV) ──────────────────────────
 apt-get install -y --no-install-recommends \
     xfce4 xfce4-terminal \
-    xserver-xorg-video-dummy \
     xfonts-base \
     desktop-file-utils \
     mesa-utils \
@@ -67,56 +66,37 @@ wget -q "https://d1uj6qtbmh3dt5.cloudfront.net/${DCV_TGZ}" || {
 
 tar xzf "$DCV_TGZ"
 cd nice-dcv-*-"${ARCH}"
-apt-get install -y ./nice-dcv-server_*.deb ./nice-dcv-web-viewer_*.deb
+apt-get install -y ./nice-dcv-server_*.deb ./nice-dcv-web-viewer_*.deb ./nice-xdcv_*.deb
 cd /tmp && rm -rf nice-dcv-* "$DCV_TGZ"
 
-# Configure DCV for automatic console session with software rendering
+# Configure DCV for virtual sessions (no display manager needed)
 cat > /etc/dcv/dcv.conf << 'DCVCONF'
 [display]
 target-fps = 30
-
-[session-management]
-create-session = true
-
-[session-management/automatic-console-session]
-owner = "ubuntu"
-storage-root = "%home%"
 
 [connectivity]
 web-port = 8443
 DCVCONF
 
-# Virtual display for software rendering (no GPU)
-cat > /etc/X11/xorg.conf << 'XORGCONF'
-Section "Device"
-    Identifier "DummyDevice"
-    Driver "dummy"
-    Option "UseEDID" "false"
-    VideoRam 512000
-EndSection
-
-Section "Monitor"
-    Identifier "DummyMonitor"
-    HorizSync   5.0 - 1000.0
-    VertRefresh 5.0 - 200.0
-    Option "ReducedBlanking"
-EndSection
-
-Section "Screen"
-    Identifier "DummyScreen"
-    Device "DummyDevice"
-    Monitor "DummyMonitor"
-    DefaultDepth 24
-    SubSection "Display"
-        Viewport 0 0
-        Depth 24
-        Virtual 3840 2160
-    EndSubSection
-EndSection
-XORGCONF
-
-systemctl set-default graphical.target
 systemctl enable dcvserver
+
+# Systemd service to auto-create a DCV virtual session on boot
+cat > /etc/systemd/system/dcv-virtual-session.service << 'UNIT'
+[Unit]
+Description=Create DCV virtual session
+After=dcvserver.service
+Requires=dcvserver.service
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 2
+ExecStart=/usr/bin/dcv create-session --type virtual --owner ubuntu main
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl enable dcv-virtual-session
 
 # ── UV (Python package manager) ─────────────────────────────────────────
 curl -LsSf https://astral.sh/uv/install.sh | sh
