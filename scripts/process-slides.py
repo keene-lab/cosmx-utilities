@@ -13,13 +13,13 @@ Usage:
 """
 
 import argparse
-import json
 import os
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import boto3
 from dotenv import load_dotenv
 
 ENV_PATH = Path(__file__).resolve().parent.parent / "fargate" / ".env"
@@ -81,20 +81,25 @@ def parse_s3_uri(uri: str) -> tuple[str, str]:
     return bucket, prefix.rstrip("/")
 
 
+_s3 = None
+
+
+def _get_s3():
+    global _s3
+    if _s3 is None:
+        _s3 = boto3.client("s3")
+    return _s3
+
+
 def s3_ls(bucket: str, prefix: str) -> list[str]:
     """List immediate children (prefixes) under an S3 path. Returns prefix names only."""
-    uri = f"s3://{bucket}/{prefix}/"
-    result = subprocess.run(
-        ["aws", "s3", "ls", uri],
-        capture_output=True, text=True, check=True,
+    response = _get_s3().list_objects_v2(
+        Bucket=bucket, Prefix=prefix.rstrip("/") + "/", Delimiter="/",
     )
-    dirs = []
-    for line in result.stdout.strip().splitlines():
-        # aws s3 ls output: "                           PRE dirname/"
-        line = line.strip()
-        if line.startswith("PRE "):
-            dirs.append(line[4:].rstrip("/"))
-    return dirs
+    return [
+        p["Prefix"].rstrip("/").rsplit("/", 1)[-1]
+        for p in response.get("CommonPrefixes", [])
+    ]
 
 
 def discover_slides(bucket: str, experiment_prefix: str) -> list[Slide]:
@@ -117,19 +122,13 @@ def discover_slides(bucket: str, experiment_prefix: str) -> list[Slide]:
 
     for run in atomx_runs:
         decoded_path = f"{experiment_prefix}/{run}/DecodedFiles"
-        try:
-            slide_names = s3_ls(bucket, decoded_path)
-        except subprocess.CalledProcessError:
-            continue  # No DecodedFiles in this directory
+        slide_names = s3_ls(bucket, decoded_path)
 
         for slide_name in slide_names:
             if slide_name == "Logs":
                 continue
             slide_path = f"{decoded_path}/{slide_name}"
-            try:
-                scan_ids = [d for d in s3_ls(bucket, slide_path) if d != "Logs"]
-            except subprocess.CalledProcessError:
-                continue
+            scan_ids = [d for d in s3_ls(bucket, slide_path) if d != "Logs"]
             for scan_id in scan_ids:
                 base_path = f"{experiment_prefix}/{run}/DecodedFiles/{slide_name}/{scan_id}"
                 slides.append(Slide(bucket=bucket, base_path=base_path))
@@ -139,12 +138,20 @@ def discover_slides(bucket: str, experiment_prefix: str) -> list[Slide]:
 
 def is_already_processed(slide: Slide) -> bool:
     """Check if output already exists for this slide in S3."""
-    uri = f"s3://{slide.bucket}/{slide.output_prefix}/"
-    result = subprocess.run(
-        ["aws", "s3", "ls", uri],
-        capture_output=True, text=True,
+    response = _get_s3().list_objects_v2(
+        Bucket=slide.bucket, Prefix=slide.output_prefix + "/", MaxKeys=1,
     )
-    return result.returncode == 0 and result.stdout.strip() != ""
+    return response.get("KeyCount", 0) > 0
+
+
+_ecs = None
+
+
+def _get_ecs():
+    global _ecs
+    if _ecs is None:
+        _ecs = boto3.client("ecs", region_name=env("AWS_REGION"))
+    return _ecs
 
 
 def launch_fargate_task(
@@ -155,7 +162,7 @@ def launch_fargate_task(
     spot: bool = False,
     segmentation_version: str | None = None,
 ) -> str | None:
-    """Launch a Fargate task for a single slide. Returns task ARN or None for whatif.
+    """Launch a Fargate task for a single slide. Returns task ID or None for whatif.
 
     When cpu/memory are provided they override the task definition values,
     allowing the same task definition to be used across different Fargate sizes.
@@ -167,7 +174,6 @@ def launch_fargate_task(
     command += [slide.bucket, slide.base_path]
 
     cluster = env("ECS_CLUSTER")
-    region = env("AWS_REGION")
     subnets = env("FARGATE_SUBNETS").split(",")
     security_group = env("FARGATE_SECURITY_GROUP")
 
@@ -193,34 +199,26 @@ def launch_fargate_task(
         print(f"  [whatif] would launch {provider} task{size_info} with command: {' '.join(command)}")
         return None
 
-    # --capacity-provider-strategy and --launch-type are mutually exclusive
-    run_task_args = [
-        "aws", "ecs", "run-task",
-        "--cluster", cluster,
-        "--task-definition", "cosmx-process-slide",
-        "--network-configuration",
-        json.dumps({
+    kwargs = {
+        "cluster": cluster,
+        "taskDefinition": "cosmx-process-slide",
+        "networkConfiguration": {
             "awsvpcConfiguration": {
                 "subnets": subnets,
                 "securityGroups": [security_group],
                 "assignPublicIp": "DISABLED",
-            }
-        }),
-        "--overrides", json.dumps(overrides),
-        "--region", region,
-        "--output", "json",
-    ]
+            },
+        },
+        "overrides": overrides,
+    }
     if spot:
-        run_task_args += ["--capacity-provider-strategy",
-            json.dumps([{"capacityProvider": "FARGATE_SPOT", "weight": 1}])]
+        kwargs["capacityProviderStrategy"] = [
+            {"capacityProvider": "FARGATE_SPOT", "weight": 1},
+        ]
     else:
-        run_task_args += ["--launch-type", "FARGATE"]
+        kwargs["launchType"] = "FARGATE"
 
-    result = subprocess.run(
-        run_task_args,
-        capture_output=True, text=True, check=True,
-    )
-    response = json.loads(result.stdout)
+    response = _get_ecs().run_task(**kwargs)
     task_arn = response["tasks"][0]["taskArn"]
     task_id = task_arn.split("/")[-1]
     return task_id

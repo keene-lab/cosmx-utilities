@@ -11,11 +11,11 @@ Usage:
 """
 
 import argparse
-import json
 import sys
 import time
 from datetime import datetime, timezone
 
+from botocore.exceptions import ClientError, WaiterError
 from dotenv import load_dotenv
 
 from _common import (
@@ -23,7 +23,7 @@ from _common import (
     ENV_PATH,
     PROJECT_TAG,
     ROOT_VOLUME_GB,
-    aws,
+    boto_session,
     env,
     log,
 )
@@ -33,48 +33,36 @@ POLL_INTERVAL_SECONDS = 60
 SETUP_TIMEOUT_SECONDS = 45 * 60  # 45 minutes
 
 
-def launch_builder(region: str, ami: str, subnet: str, sg: str,
-                   key_pair: str, profile: str) -> str:
+def launch_builder(ec2, ami: str, subnet: str, sg: str,
+                   key_pair: str, profile: str, user_data: str) -> str:
     """Launch the temporary builder instance. Returns instance ID."""
-    block_devices = json.dumps([{
-        "DeviceName": "/dev/sda1",
-        "Ebs": {"VolumeSize": ROOT_VOLUME_GB, "VolumeType": "gp3"},
-    }])
-    tags = json.dumps([
-        {
-            "ResourceType": "instance",
-            "Tags": [
-                {"Key": "Name", "Value": "cosmx-ami-builder"},
-                {"Key": "Project", "Value": PROJECT_TAG},
-            ],
-        },
-        {
-            "ResourceType": "volume",
-            "Tags": [
-                {"Key": "Name", "Value": "cosmx-ami-builder"},
-                {"Key": "Project", "Value": PROJECT_TAG},
-            ],
-        },
-    ])
-
-    result = aws(
-        "ec2", "run-instances",
-        "--region", region,
-        "--image-id", ami,
-        "--instance-type", BUILDER_INSTANCE_TYPE,
-        "--key-name", key_pair,
-        "--subnet-id", subnet,
-        "--security-group-ids", sg,
-        "--iam-instance-profile", f"Name={profile}",
-        "--user-data", f"file://{AMI_SETUP_SCRIPT}",
-        "--block-device-mappings", block_devices,
-        "--tag-specifications", tags,
-        parse_json=True,
+    tags = [
+        {"Key": "Name", "Value": "cosmx-ami-builder"},
+        {"Key": "Project", "Value": PROJECT_TAG},
+    ]
+    response = ec2.run_instances(
+        ImageId=ami,
+        InstanceType=BUILDER_INSTANCE_TYPE,
+        KeyName=key_pair,
+        SubnetId=subnet,
+        SecurityGroupIds=[sg],
+        IamInstanceProfile={"Name": profile},
+        UserData=user_data,
+        BlockDeviceMappings=[{
+            "DeviceName": "/dev/sda1",
+            "Ebs": {"VolumeSize": ROOT_VOLUME_GB, "VolumeType": "gp3"},
+        }],
+        TagSpecifications=[
+            {"ResourceType": "instance", "Tags": tags},
+            {"ResourceType": "volume", "Tags": tags},
+        ],
+        MinCount=1,
+        MaxCount=1,
     )
-    return result["Instances"][0]["InstanceId"]
+    return response["Instances"][0]["InstanceId"]
 
 
-def poll_setup_completion(region: str, instance_id: str) -> bool:
+def poll_setup_completion(ssm, instance_id: str) -> bool:
     """Poll via SSM for the sentinel file indicating setup is complete."""
     log("Waiting for AMI setup to complete (this takes 15-30 minutes)...")
     start = time.monotonic()
@@ -85,40 +73,30 @@ def poll_setup_completion(region: str, instance_id: str) -> bool:
         print(f"\r  [{minutes}m elapsed] Checking setup status...", end="", flush=True)
 
         try:
-            send_result = aws(
-                "ssm", "send-command",
-                "--region", region,
-                "--instance-ids", instance_id,
-                "--document-name", "AWS-RunShellScript",
-                "--parameters",
-                json.dumps({"commands": [
+            send_response = ssm.send_command(
+                InstanceIds=[instance_id],
+                DocumentName="AWS-RunShellScript",
+                Parameters={"commands": [
                     "test -f /var/lib/cloud/instance/ami-setup-complete && echo READY || echo PENDING"
-                ]}),
-                "--output-s3-bucket-name", "",
-                parse_json=True,
+                ]},
             )
-            command_id = send_result["Command"]["CommandId"]
-        except (SystemExit, KeyError):
+            command_id = send_response["Command"]["CommandId"]
+        except ClientError:
             # SSM agent may not be ready yet — wait and retry
             time.sleep(POLL_INTERVAL_SECONDS)
             continue
 
-        # Wait a moment for the command to execute
         time.sleep(10)
 
         try:
-            invocation = aws(
-                "ssm", "get-command-invocation",
-                "--region", region,
-                "--command-id", command_id,
-                "--instance-id", instance_id,
-                parse_json=True,
+            invocation = ssm.get_command_invocation(
+                CommandId=command_id,
+                InstanceId=instance_id,
             )
-            output = invocation.get("StandardOutputContent", "").strip()
-            if output == "READY":
-                print()  # newline after progress
+            if invocation.get("StandardOutputContent", "").strip() == "READY":
+                print()
                 return True
-        except SystemExit:
+        except ClientError:
             pass  # command not yet complete
 
         time.sleep(POLL_INTERVAL_SECONDS)
@@ -127,25 +105,22 @@ def poll_setup_completion(region: str, instance_id: str) -> bool:
     return False
 
 
-def create_image(region: str, instance_id: str, ami_name: str) -> str:
+def create_image(ec2, instance_id: str, ami_name: str) -> str:
     """Stop the instance and create an AMI from it. Returns AMI ID."""
     log("Stopping builder instance for clean snapshot...")
-    aws("ec2", "stop-instances", "--region", region, "--instance-ids", instance_id)
-    aws("ec2", "wait", "instance-stopped", "--region", region, "--instance-ids", instance_id)
+    ec2.stop_instances(InstanceIds=[instance_id])
+    ec2.get_waiter("instance_stopped").wait(InstanceIds=[instance_id])
 
     log(f"Creating AMI: {ami_name}")
-    result = aws(
-        "ec2", "create-image",
-        "--region", region,
-        "--instance-id", instance_id,
-        "--name", ami_name,
-        "--description", "CosMx analytics: R + RStudio + UV + Python + Jupyter + DCV",
-        parse_json=True,
+    response = ec2.create_image(
+        InstanceId=instance_id,
+        Name=ami_name,
+        Description="CosMx analytics: R + RStudio + UV + Python + Jupyter + DCV",
     )
-    ami_id = result["ImageId"]
+    ami_id = response["ImageId"]
 
     log(f"Waiting for AMI {ami_id} to become available...")
-    aws("ec2", "wait", "image-available", "--region", region, "--image-ids", ami_id)
+    ec2.get_waiter("image_available").wait(ImageIds=[ami_id])
     return ami_id
 
 
@@ -174,47 +149,45 @@ def main() -> None:
     key_pair = env("EC2_KEY_PAIR")
     profile = env("EC2_INSTANCE_PROFILE")
 
+    session = boto_session(region)
+    ec2 = session.client("ec2")
+    ssm = session.client("ssm")
+
     ami_name = args.name or f"cosmx-analytics-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+    user_data = AMI_SETUP_SCRIPT.read_text()
 
     log("Building CosMx analytics AMI")
     log(f"  Base AMI:       {base_ami}")
     log(f"  Builder type:   {BUILDER_INSTANCE_TYPE}")
     log(f"  AMI name:       {ami_name}")
 
-    # Launch builder
-    instance_id = launch_builder(region, base_ami, subnet, sg, key_pair, profile)
+    instance_id = launch_builder(ec2, base_ami, subnet, sg, key_pair, profile, user_data)
     log(f"Builder instance launched: {instance_id}")
 
     try:
         log("Waiting for instance to reach 'running' state...")
-        aws("ec2", "wait", "instance-running",
-            "--region", region, "--instance-ids", instance_id)
+        ec2.get_waiter("instance_running").wait(InstanceIds=[instance_id])
         log("Builder instance is running")
 
-        # Poll for setup completion
-        if not poll_setup_completion(region, instance_id):
+        if not poll_setup_completion(ssm, instance_id):
             log("ERROR: AMI setup timed out.")
-            log(f"SSH into the builder to debug: aws ssm start-session --target {instance_id}")
+            log(f"Debug: aws ssm start-session --target {instance_id}")
             log("Check /var/log/ami-setup.log for details")
-            if not args.keep_builder:
-                log(f"Builder instance {instance_id} left running for debugging")
+            log(f"Builder instance {instance_id} left running for debugging")
             sys.exit(1)
 
         log("AMI setup completed successfully")
 
-        # Create AMI
-        ami_id = create_image(region, instance_id, ami_name)
+        ami_id = create_image(ec2, instance_id, ami_name)
         log(f"AMI created: {ami_id}")
 
-        # Cleanup
         if args.keep_builder:
             log(f"Builder instance kept: {instance_id}")
         else:
             log("Terminating builder instance...")
-            aws("ec2", "terminate-instances", "--region", region, "--instance-ids", instance_id)
+            ec2.terminate_instances(InstanceIds=[instance_id])
             log("Builder instance terminated")
 
-        # Print result
         print()
         print(f"  AMI ID: {ami_id}")
         print()
@@ -225,6 +198,11 @@ def main() -> None:
         print()
         log(f"Interrupted. Builder instance {instance_id} is still running.")
         log(f"To terminate: aws ec2 terminate-instances --instance-ids {instance_id}")
+        sys.exit(1)
+
+    except (ClientError, WaiterError) as e:
+        log(f"AWS error: {e}")
+        log(f"Builder instance {instance_id} may still be running.")
         sys.exit(1)
 
 
