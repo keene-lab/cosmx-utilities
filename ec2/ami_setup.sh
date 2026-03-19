@@ -15,8 +15,13 @@ apt-get install -y --no-install-recommends \
     curl wget git unzip tmux \
     build-essential \
     software-properties-common \
-    libcurl4-openssl-dev libssl-dev libxml2-dev \
-    awscli
+    libcurl4-openssl-dev libssl-dev libxml2-dev
+
+# ── AWS CLI v2 (not available via apt on Ubuntu 24.04) ────────────────
+curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o /tmp/awscliv2.zip
+unzip -q /tmp/awscliv2.zip -d /tmp
+/tmp/aws/install
+rm -rf /tmp/aws /tmp/awscliv2.zip
 
 # ── Desktop environment (lightweight, for DCV) ──────────────────────────
 apt-get install -y --no-install-recommends \
@@ -120,7 +125,8 @@ cp /root/.local/bin/uvx /usr/local/bin/uvx
 
 # ── Clone repo and install Python environments ──────────────────────────
 REPO_DIR="/opt/cosmx-utilities"
-git clone https://github.com/keene-lab/cosmx-utilities.git "$REPO_DIR"
+GIT_BRANCH="${GIT_BRANCH:-main}"
+git clone -b "$GIT_BRANCH" https://github.com/keene-lab/cosmx-utilities.git "$REPO_DIR"
 chown -R ubuntu:ubuntu "$REPO_DIR"
 
 # Main workspace (napari-cosmx-fork + pipeline tools) — requires Python <3.11
