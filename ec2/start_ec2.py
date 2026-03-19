@@ -14,10 +14,11 @@ Usage:
 """
 
 import argparse
-import base64
-import json
+import os
+import subprocess
 import sys
 
+from botocore.exceptions import ClientError, WaiterError
 from dotenv import load_dotenv
 
 from _common import (
@@ -25,7 +26,7 @@ from _common import (
     ENV_PATH,
     PROJECT_TAG,
     ROOT_VOLUME_GB,
-    aws,
+    boto_session,
     env,
     log,
 )
@@ -105,81 +106,96 @@ def main() -> None:
     key_pair = env("EC2_KEY_PAIR")
     profile = env("EC2_INSTANCE_PROFILE")
 
+    dcv_password = os.environ.get("DCV_PASSWORD")
+
+    # Detect current git branch so the instance clones the right code
+    try:
+        git_branch = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            text=True,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        git_branch = "main"
+
     if args.raw:
         ami_id = env("UBUNTU_BASE_AMI")
         if not AMI_SETUP_SCRIPT.exists():
             print(f"ERROR: {AMI_SETUP_SCRIPT} not found", file=sys.stderr)
             sys.exit(1)
         setup_script = AMI_SETUP_SCRIPT.read_text()
-        user_data_str = setup_script.rstrip() + "\n\n" + MOUNT_VOLUME_SNIPPET
+        user_data = setup_script.rstrip() + "\n\n" + MOUNT_VOLUME_SNIPPET
     else:
         ami_id = env("EC2_AMI_ID")
-        user_data_str = MOUNT_USER_DATA
+        user_data = MOUNT_USER_DATA
+
+    # Inject variables after the set -e line in user-data
+    injected = f'export GIT_BRANCH="{git_branch}"\n'
+    if dcv_password:
+        injected += f'echo "ubuntu:{dcv_password}" | chpasswd\n'
+    for marker in ("set -euxo pipefail\n", "set -euo pipefail\n"):
+        if marker in user_data:
+            user_data = user_data.replace(marker, marker + injected, 1)
+            break
+
+    session = boto_session(region)
+    ec2 = session.client("ec2")
 
     mode = "RAW (ami_setup.sh)" if args.raw else "AMI"
     log(f"Launching CosMx analytics instance [{mode}]")
     log(f"  AMI:            {ami_id}")
     log(f"  Instance type:  {args.instance_type}")
     log(f"  Data volume:    {args.storage} GB")
+    log(f"  Git branch:     {git_branch}")
     log(f"  Name:           {args.name}")
-
-    block_devices = json.dumps([
-        {
-            "DeviceName": "/dev/sda1",
-            "Ebs": {"VolumeSize": ROOT_VOLUME_GB, "VolumeType": "gp3"},
-        },
-        {
-            "DeviceName": "/dev/sdf",
-            "Ebs": {
-                "VolumeSize": args.storage,
-                "VolumeType": "gp3",
-                "DeleteOnTermination": True,
-            },
-        },
-    ])
 
     resource_tags = [
         {"Key": "Name", "Value": args.name},
         {"Key": "Project", "Value": PROJECT_TAG},
     ]
-    tags = json.dumps([
-        {"ResourceType": "instance", "Tags": resource_tags},
-        {"ResourceType": "volume", "Tags": resource_tags},
-    ])
 
-    user_data_b64 = base64.b64encode(user_data_str.encode()).decode()
+    try:
+        response = ec2.run_instances(
+            ImageId=ami_id,
+            InstanceType=args.instance_type,
+            KeyName=key_pair,
+            SubnetId=subnet,
+            SecurityGroupIds=[sg],
+            IamInstanceProfile={"Name": profile},
+            UserData=user_data,
+            BlockDeviceMappings=[
+                {
+                    "DeviceName": "/dev/sda1",
+                    "Ebs": {"VolumeSize": ROOT_VOLUME_GB, "VolumeType": "gp3"},
+                },
+                {
+                    "DeviceName": "/dev/sdf",
+                    "Ebs": {
+                        "VolumeSize": args.storage,
+                        "VolumeType": "gp3",
+                        "DeleteOnTermination": True,
+                    },
+                },
+            ],
+            TagSpecifications=[
+                {"ResourceType": "instance", "Tags": resource_tags},
+                {"ResourceType": "volume", "Tags": resource_tags},
+            ],
+            MinCount=1,
+            MaxCount=1,
+        )
 
-    result = aws(
-        "ec2", "run-instances",
-        "--region", region,
-        "--image-id", ami_id,
-        "--instance-type", args.instance_type,
-        "--key-name", key_pair,
-        "--subnet-id", subnet,
-        "--security-group-ids", sg,
-        "--iam-instance-profile", f"Name={profile}",
-        "--user-data", user_data_b64,
-        "--block-device-mappings", block_devices,
-        "--tag-specifications", tags,
-        parse_json=True,
-    )
+        instance_id = response["Instances"][0]["InstanceId"]
+        log(f"Instance launched: {instance_id}")
 
-    instance_id = result["Instances"][0]["InstanceId"]
-    log(f"Instance launched: {instance_id}")
+        log("Waiting for instance to start...")
+        ec2.get_waiter("instance_running").wait(InstanceIds=[instance_id])
 
-    log("Waiting for instance to start...")
-    aws("ec2", "wait", "instance-running",
-        "--region", region, "--instance-ids", instance_id)
+        desc = ec2.describe_instances(InstanceIds=[instance_id])
+        private_ip = desc["Reservations"][0]["Instances"][0].get("PrivateIpAddress", "N/A")
 
-    # Get private IP
-    desc = aws(
-        "ec2", "describe-instances",
-        "--region", region,
-        "--instance-ids", instance_id,
-        "--query", "Reservations[0].Instances[0].PrivateIpAddress",
-        "--output", "text",
-    )
-    private_ip = desc.stdout.strip()
+    except (ClientError, WaiterError) as e:
+        log(f"AWS error: {e}")
+        sys.exit(1)
 
     log("Instance is running")
     print()
@@ -199,9 +215,12 @@ def main() -> None:
     print(f"  aws ssm start-session --target {instance_id} --region {region}")
     print()
     print("Connect via DCV (remote desktop on port 8443):")
-    print(f"  Set a password first: aws ssm start-session --target {instance_id}")
-    print("  Then run: sudo passwd ubuntu")
-    print(f"  Open DCV client and connect to {private_ip}")
+    if dcv_password:
+        print(f"  Open DCV client and connect to {private_ip}")
+    else:
+        print(f"  Set a password first: aws ssm start-session --target {instance_id}")
+        print("  Then run: sudo passwd ubuntu")
+        print(f"  Open DCV client and connect to {private_ip}")
     print()
     print("Sync data from S3:")
     print(f"  ./scripts/sync-to-ec2.sh s3://your-bucket/napari-stitched/study/experiment/ {instance_id}")
