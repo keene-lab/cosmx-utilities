@@ -29,7 +29,12 @@ apt-get install -y --no-install-recommends \
     xfonts-base \
     desktop-file-utils \
     mesa-utils \
-    dbus-x11
+    dbus-x11 \
+    firefox \
+    libgles2 libegl1 libgl1-mesa-dri \
+    libxcb-cursor0 libxcb-xinerama0 libxcb-randr0 libxcb-shape0 \
+    libxcb-xfixes0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+    libxcb-render-util0 libxkbcommon-x11-0
 
 # ── R from Ubuntu repos (pre-built binaries, fast) ──────────────────────
 apt-get install -y --no-install-recommends \
@@ -112,7 +117,7 @@ chown -R ubuntu:ubuntu "$REPO_DIR"
 # Main workspace (napari-cosmx-fork + pipeline tools) — requires Python <3.11
 cd "$REPO_DIR"
 sudo -u ubuntu uv python install 3.10
-sudo -u ubuntu uv sync --python 3.10
+sudo -u ubuntu uv sync --python 3.10 --extra gui
 
 # Analytics environment (Jupyter + Polars) — uses latest Python
 cd "$REPO_DIR/ec2/analytics"
@@ -121,6 +126,11 @@ sudo -u ubuntu uv sync
 # ── Default mount point for data ────────────────────────────────────────
 mkdir -p /mnt/cosmx
 chown ubuntu:ubuntu /mnt/cosmx
+
+# ── Start DCV now (services are enabled for future boots) ─────────────
+systemctl start dcvserver
+sleep 2
+systemctl start dcv-virtual-session
 
 # ── Sentinel: signal setup completion ────────────────────────────────────
 touch /var/lib/cloud/instance/ami-setup-complete
