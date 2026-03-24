@@ -5,9 +5,14 @@ Spins up an r5a.4xlarge (or custom type) with a configurable secondary
 EBS data volume that is auto-formatted and mounted at /mnt/cosmx.
 
 Usage:
+    # CosMx analytics (memory-optimized, default):
     uv run python ec2/start_ec2.py --name emily-gbm-analysis
     uv run python ec2/start_ec2.py --name emily-gbm-analysis --storage 1024
     uv run python ec2/start_ec2.py --name emily-gbm-analysis --instance-type r5a.8xlarge
+
+    # Napari viewer (GPU + local NVMe for fast slide loading):
+    uv run python ec2/start_ec2.py --name emily-napari --napari --raw
+    uv run python ec2/start_ec2.py --name emily-napari --napari --raw --s3 s3://bucket/napari-stitched/study/experiment/
 
     # Test ami_setup.sh on a raw Ubuntu instance (no AMI needed):
     uv run python ec2/start_ec2.py --name test-ami-setup --raw
@@ -31,8 +36,12 @@ from _common import (
     log,
 )
 
-DEFAULT_INSTANCE_TYPE = "r5a.4xlarge"
+ANALYTICS_INSTANCE_TYPE = "r5a.4xlarge"
+NAPARI_INSTANCE_TYPE = "g4dn.4xlarge"
 DEFAULT_STORAGE_GB = 512
+NAPARI_NVME_GB = 225
+# Reserve space for OS overhead, filesystem metadata, and temp files
+NAPARI_NVME_USABLE_GB = 200
 
 # Bash snippet to find, format, and mount the secondary NVMe data volume.
 # On Nitro instances (r5a), /dev/sdf appears as /dev/nvme1n1.
@@ -65,10 +74,61 @@ else
 fi
 """
 
+# Bash snippet to format and mount the local NVMe instance store on g4dn.
+# The instance store is ephemeral — data is lost on stop/terminate.
+# ~225 GB fast SSD mounted at /mnt/local for active slide viewing.
+# Since Napari mode has no secondary EBS, the only non-root NVMe device
+# is the instance store — no need for nvme-cli to distinguish them.
+MOUNT_VOLUME_NAPARI_SNIPPET = """\
+# ── Mount local NVMe instance store ──────────────────────────────────────
+DEVICE=""
+for d in /dev/nvme*n1; do
+    ROOT_DEV=$(findmnt -n -o SOURCE /)
+    ROOT_NVME=$(readlink -f "$ROOT_DEV" | sed 's/p[0-9]*$//')
+    if [ "$d" != "$ROOT_NVME" ]; then
+        DEVICE="$d"
+        break
+    fi
+done
+
+if [ -z "$DEVICE" ]; then
+    echo "No NVMe instance store found" >> /var/log/mount-data.log
+else
+    mkfs.ext4 -F "$DEVICE"
+    mkdir -p /mnt/local
+    mount "$DEVICE" /mnt/local
+    chown ubuntu:ubuntu /mnt/local
+    echo "Instance store $DEVICE mounted at /mnt/local" >> /var/log/mount-data.log
+fi
+"""
+
 MOUNT_USER_DATA = f"""\
 #!/bin/bash
 set -euo pipefail
 {MOUNT_VOLUME_SNIPPET}"""
+
+MOUNT_USER_DATA_NAPARI = f"""\
+#!/bin/bash
+set -euo pipefail
+{MOUNT_VOLUME_NAPARI_SNIPPET}"""
+
+
+def s3_total_size_gb(s3_uri: str, region: str) -> float:
+    """Return total size in GB of all objects under an S3 prefix."""
+    session = boto_session(region)
+    s3 = session.client("s3")
+
+    # Parse s3://bucket/prefix
+    without_scheme = s3_uri[len("s3://"):]
+    bucket, _, prefix = without_scheme.partition("/")
+
+    total_bytes = 0
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            total_bytes += obj["Size"]
+
+    return total_bytes / (1024 ** 3)
 
 
 def main() -> None:
@@ -88,8 +148,13 @@ def main() -> None:
     )
     parser.add_argument(
         "--instance-type",
-        default=DEFAULT_INSTANCE_TYPE,
-        help=f"EC2 instance type (default: {DEFAULT_INSTANCE_TYPE})",
+        help="EC2 instance type (overrides default for chosen mode)",
+    )
+    parser.add_argument(
+        "--napari",
+        action="store_true",
+        help=f"Launch a Napari viewer instance ({NAPARI_INSTANCE_TYPE}) with "
+             "GPU + local NVMe for fast slide loading",
     )
     parser.add_argument(
         "--raw",
@@ -97,7 +162,28 @@ def main() -> None:
         help="Launch a raw Ubuntu instance with ami_setup.sh as user-data "
              "(for testing setup without building an AMI)",
     )
+    parser.add_argument(
+        "--s3",
+        metavar="S3_URI",
+        help="S3 path to sync to the local NVMe after mount "
+             "(e.g. s3://bucket/napari-stitched/study/experiment/). "
+             "Requires --raw and --napari.",
+    )
     args = parser.parse_args()
+
+    if args.s3 and not (args.raw and args.napari):
+        print("ERROR: --s3 requires both --raw and --napari", file=sys.stderr)
+        sys.exit(1)
+
+    if args.s3 and not args.s3.startswith("s3://"):
+        print("ERROR: --s3 must be an S3 URI (s3://...)", file=sys.stderr)
+        sys.exit(1)
+
+    if not args.instance_type:
+        args.instance_type = NAPARI_INSTANCE_TYPE if args.napari else ANALYTICS_INSTANCE_TYPE
+
+    if args.napari and args.storage != DEFAULT_STORAGE_GB:
+        print("WARNING: --storage is ignored with --napari (no EBS data volume)", file=sys.stderr)
 
     load_dotenv(ENV_PATH)
     region = env("AWS_REGION")
@@ -108,6 +194,21 @@ def main() -> None:
 
     dcv_password = os.environ.get("DCV_PASSWORD")
 
+    if args.s3:
+        log(f"Checking S3 size of {args.s3} ...")
+        s3_size = s3_total_size_gb(args.s3, region)
+        log(f"  S3 data size: {s3_size:.1f} GB (NVMe usable: ~{NAPARI_NVME_USABLE_GB} GB)")
+        if s3_size > NAPARI_NVME_USABLE_GB:
+            print(
+                f"ERROR: S3 data ({s3_size:.1f} GB) exceeds NVMe usable capacity "
+                f"(~{NAPARI_NVME_USABLE_GB} GB of {NAPARI_NVME_GB} GB total)",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if s3_size == 0:
+            print(f"ERROR: No objects found at {args.s3}", file=sys.stderr)
+            sys.exit(1)
+
     # Detect current git branch so the instance clones the right code
     try:
         git_branch = subprocess.check_output(
@@ -117,16 +218,28 @@ def main() -> None:
     except (subprocess.CalledProcessError, FileNotFoundError):
         git_branch = "main"
 
+    mount_snippet = MOUNT_VOLUME_NAPARI_SNIPPET if args.napari else MOUNT_VOLUME_SNIPPET
+
     if args.raw:
         ami_id = env("UBUNTU_BASE_AMI")
         if not AMI_SETUP_SCRIPT.exists():
             print(f"ERROR: {AMI_SETUP_SCRIPT} not found", file=sys.stderr)
             sys.exit(1)
         setup_script = AMI_SETUP_SCRIPT.read_text()
-        user_data = setup_script.rstrip() + "\n\n" + MOUNT_VOLUME_SNIPPET
+        user_data = setup_script.rstrip() + "\n\n" + mount_snippet
+        if args.s3:
+            s3_sync_snippet = f"""
+# ── Sync stitched slides from S3 to local NVMe ──────────────────────────
+echo "Syncing from {args.s3} to /mnt/local/stitched ..."
+sudo -u ubuntu mkdir -p /mnt/local/stitched
+sudo -u ubuntu aws s3 sync '{args.s3}' /mnt/local/stitched >> /var/log/ami-setup.log 2>&1
+echo "S3 sync complete. Files:" >> /var/log/ami-setup.log
+ls -lh /mnt/local/stitched >> /var/log/ami-setup.log 2>&1
+"""
+            user_data = user_data.rstrip() + "\n" + s3_sync_snippet
     else:
         ami_id = env("EC2_AMI_ID")
-        user_data = MOUNT_USER_DATA
+        user_data = MOUNT_USER_DATA_NAPARI if args.napari else MOUNT_USER_DATA
 
     # Inject variables after the set -e line in user-data
     injected = f'export GIT_BRANCH="{git_branch}"\n'
@@ -141,10 +254,16 @@ def main() -> None:
     ec2 = session.client("ec2")
 
     mode = "RAW (ami_setup.sh)" if args.raw else "AMI"
-    log(f"Launching CosMx analytics instance [{mode}]")
+    variant = "Napari viewer" if args.napari else "CosMx analytics"
+    log(f"Launching {variant} instance [{mode}]")
     log(f"  AMI:            {ami_id}")
     log(f"  Instance type:  {args.instance_type}")
-    log(f"  Data volume:    {args.storage} GB")
+    if args.napari:
+        log("  Local NVMe:     ~225 GB (instance store, mounted at /mnt/local)")
+        if args.s3:
+            log(f"  S3 sync:        {args.s3} → /mnt/local/stitched")
+    else:
+        log(f"  Data volume:    {args.storage} GB")
     log(f"  Git branch:     {git_branch}")
     log(f"  Name:           {args.name}")
 
@@ -152,6 +271,29 @@ def main() -> None:
         {"Key": "Name", "Value": args.name},
         {"Key": "Project", "Value": PROJECT_TAG},
     ]
+
+    block_devices = [
+        {
+            "DeviceName": "/dev/sda1",
+            "Ebs": {"VolumeSize": ROOT_VOLUME_GB, "VolumeType": "gp3"},
+        },
+    ]
+    if args.napari:
+        # Local NVMe instance store only — no EBS data volume needed
+        block_devices.append(
+            {"DeviceName": "/dev/sdb", "VirtualName": "ephemeral0"}
+        )
+    else:
+        block_devices.append(
+            {
+                "DeviceName": "/dev/sdf",
+                "Ebs": {
+                    "VolumeSize": args.storage,
+                    "VolumeType": "gp3",
+                    "DeleteOnTermination": True,
+                },
+            },
+        )
 
     try:
         response = ec2.run_instances(
@@ -162,20 +304,7 @@ def main() -> None:
             SecurityGroupIds=[sg],
             IamInstanceProfile={"Name": profile},
             UserData=user_data,
-            BlockDeviceMappings=[
-                {
-                    "DeviceName": "/dev/sda1",
-                    "Ebs": {"VolumeSize": ROOT_VOLUME_GB, "VolumeType": "gp3"},
-                },
-                {
-                    "DeviceName": "/dev/sdf",
-                    "Ebs": {
-                        "VolumeSize": args.storage,
-                        "VolumeType": "gp3",
-                        "DeleteOnTermination": True,
-                    },
-                },
-            ],
+            BlockDeviceMappings=block_devices,
             TagSpecifications=[
                 {"ResourceType": "instance", "Tags": resource_tags},
                 {"ResourceType": "volume", "Tags": resource_tags},
@@ -201,7 +330,10 @@ def main() -> None:
     print()
     print(f"  Instance ID:  {instance_id}")
     print(f"  Private IP:   {private_ip}")
-    print(f"  Data volume:  {args.storage} GB (auto-mounted at /mnt/cosmx)")
+    if args.napari:
+        print("  Local NVMe:   ~225 GB (auto-mounted at /mnt/local)")
+    else:
+        print(f"  Data volume:  {args.storage} GB (auto-mounted at /mnt/cosmx)")
     print()
 
     if args.raw:
@@ -222,15 +354,37 @@ def main() -> None:
         print("  Then run: sudo passwd ubuntu")
         print(f"  Open DCV client and connect to {private_ip}")
     print()
-    print("Sync data from S3:")
-    print(f"  ./scripts/sync-to-ec2.sh s3://your-bucket/napari-stitched/study/experiment/ {instance_id}")
-    print()
-    print("Launch Jupyter (on the instance):")
-    print("  cd /opt/cosmx-utilities/ec2/analytics && uv run jupyter lab --ip 0.0.0.0 --port 8888")
-    print()
-    print("Launch Napari (on the instance via DCV):")
-    print("  cd /opt/cosmx-utilities && uv run napari /mnt/cosmx")
-    print()
+
+    if args.napari:
+        if args.s3:
+            print("S3 sync is running automatically as part of instance setup.")
+            print("  Monitor progress: tail -f /var/log/ami-setup.log")
+            print(f"  Files will appear in /mnt/local/stitched")
+            print()
+            print("Launch Napari (on the instance via DCV):")
+            print("  cd /opt/cosmx-utilities && uv run napari /mnt/local/stitched")
+        else:
+            print("Copy slide to local NVMe for fast loading:")
+            print(f"  # On the instance — sync from S3 to local NVMe:")
+            print("  aws s3 sync s3://your-bucket/napari-stitched/study/experiment/ /mnt/local/slide/")
+            print()
+            print("Launch Napari (on the instance via DCV):")
+            print("  cd /opt/cosmx-utilities && uv run napari /mnt/local/slide")
+        print()
+        print("NOTE: /mnt/local is ephemeral instance storage — data is lost when")
+        print("  the instance stops or terminates. Source data lives on S3.")
+        print()
+    else:
+        print("Sync data from S3:")
+        print(f"  ./scripts/sync-to-ec2.sh s3://your-bucket/napari-stitched/study/experiment/ {instance_id}")
+        print()
+        print("Launch Jupyter (on the instance):")
+        print("  cd /opt/cosmx-utilities/ec2/analytics && uv run jupyter lab --ip 0.0.0.0 --port 8888")
+        print()
+        print("Launch Napari (on the instance via DCV):")
+        print("  cd /opt/cosmx-utilities && uv run napari /mnt/cosmx")
+        print()
+
     print("When done, stop or terminate the instance:")
     print(f"  aws ec2 stop-instances --instance-ids {instance_id} --region {region}")
     print(f"  aws ec2 terminate-instances --instance-ids {instance_id} --region {region}")
