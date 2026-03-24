@@ -37,7 +37,8 @@ apt-get install -y --no-install-recommends \
     libgles2 libegl1 libgl1-mesa-dri \
     libxcb-cursor0 libxcb-xinerama0 libxcb-randr0 libxcb-shape0 \
     libxcb-xfixes0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
-    libxcb-render-util0 libxkbcommon-x11-0
+    libxcb-render-util0 libxkbcommon-x11-0 \
+    at-spi2-core xdg-desktop-portal xdg-desktop-portal-gtk
 
 if [ "$EC2_MODE" != "napari" ]; then
 # ── R from Ubuntu repos (pre-built binaries, fast) ──────────────────────
