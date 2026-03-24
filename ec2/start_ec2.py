@@ -242,7 +242,8 @@ ls -lh /mnt/local/stitched >> /var/log/ami-setup.log 2>&1
         user_data = MOUNT_USER_DATA_NAPARI if args.napari else MOUNT_USER_DATA
 
     # Inject variables after the set -e line in user-data
-    injected = f'export GIT_BRANCH="{git_branch}"\n'
+    ec2_mode = "napari" if args.napari else "analytics"
+    injected = f'export GIT_BRANCH="{git_branch}"\nexport EC2_MODE="{ec2_mode}"\n'
     if dcv_password:
         injected += f'echo "ubuntu:{dcv_password}" | chpasswd\n'
     for marker in ("set -euxo pipefail\n", "set -euo pipefail\n"):

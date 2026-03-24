@@ -1,13 +1,16 @@
 #!/bin/bash
-# Cloud-init user-data script for the CosMx analytics AMI.
-# Installs R, RStudio, DCV, UV, Python environments, and Jupyter.
-# Run by create_ami.py as user-data on a temporary builder instance.
+# Cloud-init user-data script for CosMx EC2 instances.
+# Installs DCV, UV, Python environments, and (in analytics mode) R/RStudio.
+# EC2_MODE controls what gets installed: "analytics" (default) or "napari".
+# Run by create_ami.py or start_ec2.py --raw as user-data.
 set -euxo pipefail
 
 exec > >(tee /var/log/ami-setup.log) 2>&1
 echo "=== AMI setup started at $(date -u) ==="
 
 export DEBIAN_FRONTEND=noninteractive
+EC2_MODE="${EC2_MODE:-analytics}"
+echo "EC2_MODE=$EC2_MODE"
 
 # ── System packages ──────────────────────────────────────────────────────
 apt-get update && apt-get upgrade -y
@@ -36,6 +39,7 @@ apt-get install -y --no-install-recommends \
     libxcb-xfixes0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
     libxcb-render-util0 libxkbcommon-x11-0
 
+if [ "$EC2_MODE" != "napari" ]; then
 # ── R from Ubuntu repos (pre-built binaries, fast) ──────────────────────
 apt-get install -y --no-install-recommends \
     r-base \
@@ -56,6 +60,7 @@ apt-get install -y "./rstudio-server-${RSTUDIO_VERSION}-amd64.deb" || {
 }
 rm -f rstudio-server-*.deb
 systemctl enable rstudio-server
+fi
 
 # ── NICE DCV (software rendering, no GPU) ───────────────────────────────
 cd /tmp
@@ -119,6 +124,7 @@ cd "$REPO_DIR"
 sudo -u ubuntu uv python install 3.10
 sudo -u ubuntu uv sync --python 3.10 --extra gui
 
+if [ "$EC2_MODE" != "napari" ]; then
 # Analytics environment (Jupyter + Polars) — uses latest Python
 cd "$REPO_DIR/ec2/analytics"
 sudo -u ubuntu uv sync
@@ -126,6 +132,7 @@ sudo -u ubuntu uv sync
 # ── Default mount point for data ────────────────────────────────────────
 mkdir -p /mnt/cosmx
 chown ubuntu:ubuntu /mnt/cosmx
+fi
 
 # ── Start DCV now (services are enabled for future boots) ─────────────
 systemctl start dcvserver
