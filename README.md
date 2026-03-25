@@ -16,8 +16,9 @@ flowchart TD
     classDef futureAction fill:#4b2e83,stroke:#b7a57a,stroke-width:2px,stroke-dasharray: 5 5,color:#ffffff
 
     style fargate fill:#c5b4e3,stroke:none
+    style ec2 fill:#d4edda,stroke:none
     style hyak fill:#85754d,stroke:none
-    
+
     atomx["AtoMx study export"]:::data
     sftp["Download slides from BSB SFTP endpoint"]:::action
     s3raw["Raw slide data<br>(AWS S3)"]:::data
@@ -40,6 +41,15 @@ flowchart TD
         stitch --> targets --> meta
     end
 
+    subgraph ec2["AWS EC2 (auto-provisioned)"]
+        direction TB
+        ami["Build custom AMI<br>(create_ami.py)"]:::action
+        launch["Launch GPU instance<br>(start_ec2.py --napari)"]:::action
+        sync["Sync processed data from S3 to NVMe"]:::action
+        dcv["Connect via DCV remote desktop"]:::action
+        ami --> launch --> sync --> dcv
+    end
+
     subgraph hyak["Future direction: Hyak GPU"]
         direction TB
         etl["Reshape expression data for cell typing and batch correction"]:::futureAction
@@ -56,7 +66,8 @@ flowchart TD
     s3raw -- per slide (slurm job) --> etl
     scalesc -.-> s3out
     scvi -.-> s3out
-    s3out --> napari
+    s3out --> launch
+    dcv --> napari
 ```
 
 ## Key design decisions
@@ -75,6 +86,10 @@ cosmx-utilities/
 │   ├── process-slides.py    # Discover all slides in S3 and launch Fargate tasks
 │   └── generate-slide-metadata.py  # Generate _metadata.csv with cell metadata and deterministic colors
 ├── fargate/                 # Fargate task definitions and IAM configuration
+├── ec2/                     # EC2 auto-provisioning for analytics and Napari viewer instances
+│   ├── start_ec2.py         # Launch analytics (r5a) or Napari (g4dn GPU) instances
+│   ├── create_ami.py        # Build custom AMI with all dependencies pre-installed
+│   └── ami_setup.sh         # User-data setup script (deps, volumes, DCV)
 ├── Dockerfile               # Multi-stage: headless (Fargate) and GUI (desktop) targets
 └── pyproject.toml           # uv workspace with optional [gui] extra
 ```
