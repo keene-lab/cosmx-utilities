@@ -16,7 +16,7 @@ flowchart TD
     classDef futureAction fill:#4b2e83,stroke:#b7a57a,stroke-width:2px,stroke-dasharray: 5 5,color:#ffffff
 
     style fargate fill:#c5b4e3,stroke:none
-    style ec2 fill:#d4edda,stroke:none
+    style ec2 fill:#c5b4e3,stroke:none
     style hyak fill:#85754d,stroke:none
 
     atomx["AtoMx study export"]:::data

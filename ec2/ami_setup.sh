@@ -44,12 +44,20 @@ if [ "$EC2_MODE" != "napari" ]; then
 # ── R from Ubuntu repos (pre-built binaries, fast) ──────────────────────
 apt-get install -y --no-install-recommends \
     r-base \
+    gfortran \
+    libgmp-dev libmpfr-dev libarmadillo-dev libglpk-dev libnlopt-dev libgsl-dev \
     r-cran-ggplot2 \
     r-cran-dplyr \
     r-cran-reticulate \
     r-cran-remotes
 
-# insitutype is the only package requiring a GitHub install
+# InSituType CRAN dependencies
+Rscript -e 'install.packages(c("fastglm", "irlba", "mclust", "umap", "uwot", "RcppArmadillo", "data.table", "Matrix"), repos = "https://cloud.r-project.org")'
+
+# InSituType Bioconductor dependencies
+Rscript -e 'if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager", repos = "https://cloud.r-project.org"); BiocManager::install(c("SingleCellExperiment", "SummarizedExperiment", "sparseMatrixStats", "spatstat.geom"), ask = FALSE)'
+
+# InSituType itself (GitHub only)
 Rscript -e 'remotes::install_github("Nanostring-Biostats/insitutype")'
 
 # ── RStudio Server ──────────────────────────────────────────────────────
