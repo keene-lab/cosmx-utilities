@@ -117,6 +117,9 @@ WantedBy=multi-user.target
 UNIT
 systemctl enable dcv-virtual-session
 
+# ── rclone (fast parallel S3 transfers) ─────────────────────────────────
+curl -sSL https://rclone.org/install.sh | bash
+
 # ── UV (Python package manager) ─────────────────────────────────────────
 curl -LsSf https://astral.sh/uv/install.sh | sh
 cp /root/.local/bin/uv /usr/local/bin/uv
