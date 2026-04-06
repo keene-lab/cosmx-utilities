@@ -24,6 +24,7 @@ import argparse
 import csv
 import gzip
 import os
+import re
 import sys
 import tempfile
 
@@ -86,11 +87,26 @@ def find_metadata_file(
     return results
 
 
+CELL_TYPE_COLUMN_PATTERN = re.compile(r"RNA_RNA_Cell\.Typing\.InSituType\..*_clusters$")
+
+
+def _detect_cell_type_column(headers: list[str]) -> str | None:
+    """Auto-detect the cell type column from CSV headers."""
+    matches = [h for h in headers if CELL_TYPE_COLUMN_PATTERN.match(h)]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        print(f"  Multiple InSituType columns found: {matches}")
+        print(f"  Using first match: {matches[0]}")
+        return matches[0]
+    return None
+
+
 def generate_metadata(
     input_path: str,
     output_path: str,
     seg_id: str | None,
-    cell_type_column: str,
+    cell_type_column: str | None,
 ) -> dict:
     """Read a gzipped metadata CSV, filter by segmentation ID, and write
     _metadata.csv.
@@ -107,6 +123,14 @@ def generate_metadata(
     with gzip.open(input_path, "rt") as f:
         reader = csv.DictReader(f)
 
+        # Auto-detect cell type column if not specified
+        if cell_type_column is None:
+            cell_type_column = _detect_cell_type_column(reader.fieldnames or [])
+            if cell_type_column:
+                print(f"  Auto-detected cell type column: {cell_type_column}")
+            else:
+                print("  WARNING: No InSituType column found, cell_type will be empty")
+
         for row in reader:
             total_read += 1
             row_seg_id = row.get("cellSegmentationSetId", "").strip()
@@ -116,7 +140,7 @@ def generate_metadata(
                 continue
 
             cell_id = row.get("cell_id", "")
-            cell_type = row.get(cell_type_column, "")
+            cell_type = row.get(cell_type_column, "") if cell_type_column else ""
             rows.append((cell_id, cell_type))
 
     # Build color map (deterministic per cell type)
@@ -164,8 +188,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--cell-type-column",
-        default="RNA_RNA_Cell.Typing.InSituType.Core.GBmap_1_clusters",
-        help="Column name for cell type annotations",
+        default=None,
+        help="Column name for cell type annotations. Auto-detected from "
+             "InSituType columns if omitted.",
     )
     parser.add_argument(
         "--output", required=True,
