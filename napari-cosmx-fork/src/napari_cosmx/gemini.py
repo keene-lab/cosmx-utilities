@@ -29,6 +29,11 @@ from inspect import signature
 from os import listdir
 from importlib.metadata import version
 
+# Sentinel key used to pad a single-color dict so vispy gets the ≥2 distinct
+# colors it requires.  The value is never mapped to a real label.
+_COLORMAP_PADDING_KEY = -1
+
+
 class Gemini:
     """Initialize new instance and launch viewer
 
@@ -659,11 +664,13 @@ class Gemini:
             subset (list of int): List of cell UIDs, if given only color these cells.
         """
         label_colors = {}
-        if self.metadata is None:        
+        if self.metadata is None:
             assert col_name == "all", "No metadata loaded"
             label_colors = {1: color, None: color}
         else:
             cells = subset if (subset is not None) else self.metadata.index
+            if len(cells) == 0:
+                return
             if col_name == "all":
                 color = transform_color(color)[0]
                 label_colors = {k:color for k in cells}
@@ -688,8 +695,15 @@ class Gemini:
                     else:
                         assert isinstance(color, dict), "color needs to be dict for categorical metadata"
                         color = {k:transform_color(v)[0] for k,v in color.items()}
-                    label_colors = {k:(color[v] if v in color else transform_color('transparent')[0])
-                        for k,v in zip(cells, self.metadata.loc[cells][col_name])}
+                    # NaN != NaN in Python, so dict lookup with `v in color` fails
+                    # for NaN keys. Use pd.isna to handle NaN values explicitly.
+                    nan_color = next((c for k, c in color.items() if pd.isna(k)), None)
+                    def _lookup(v):
+                        if pd.isna(v):
+                            return nan_color if nan_color is not None else transform_color('transparent')[0]
+                        return color[v] if v in color else transform_color('transparent')[0]
+                    label_colors = {k: _lookup(v)
+                        for k, v in zip(cells, self.metadata.loc[cells][col_name])}
                 else:
                     if color is None:
                         color = 'gray'
@@ -743,6 +757,14 @@ class Gemini:
         labelsdir = 'labels' if 'labels' in self.grp.group_keys() else 'labels.zarr'
         datasets = self.grp[labelsdir].attrs["multiscales"][0]["datasets"]
         # from napari Labels layer
+        # vispy requires at least 2 distinct colors in a colormap; if the dict
+        # has only one unique color (e.g. no cells loaded), add a dummy entry
+        # so color_dict_to_colormap produces a valid colormap.
+        # Use near-zero alpha so the padding color is always distinct from both
+        # fully-transparent [0,0,0,0] and any visible color.
+        unique_colors = np.unique(list(colors.values()), axis=0)
+        if len(unique_colors) < 2:
+            colors[_COLORMAP_PADDING_KEY] = np.array([0.0, 0.0, 0.0, 1e-4], dtype=np.float32)
         with warnings.catch_warnings():
             # suppress known warning
             warnings.filterwarnings(action='ignore', message='.*distinct colors.*')

@@ -12,6 +12,7 @@ Usage:
 
     # Napari viewer (GPU + local NVMe for fast slide loading):
     uv run python ec2/start_ec2.py --name emily-napari --napari --raw
+    # Auto-selects instance size based on S3 data (g4dn.4xlarge ≤200 GB, g4dn.8xlarge ≤850 GB):
     uv run python ec2/start_ec2.py --name emily-napari --napari --raw --s3 s3://bucket/napari-stitched/study/experiment/
 
     # Test ami_setup.sh on a raw Ubuntu instance (no AMI needed):
@@ -37,11 +38,16 @@ from _common import (
 )
 
 ANALYTICS_INSTANCE_TYPE = "r5a.4xlarge"
-NAPARI_INSTANCE_TYPE = "g4dn.4xlarge"
 DEFAULT_STORAGE_GB = 512
-NAPARI_NVME_GB = 225
-# Reserve space for OS overhead, filesystem metadata, and temp files
-NAPARI_NVME_USABLE_GB = 200
+
+# Napari instance tiers — ordered smallest to largest.
+# Each tier maps an instance type to its (total NVMe GB, usable GB) after
+# reserving space for OS overhead, filesystem metadata, and temp files.
+NAPARI_TIERS = [
+    ("g4dn.4xlarge", 225, 200),
+    ("g4dn.8xlarge", 900, 850),
+]
+NAPARI_DEFAULT_INSTANCE_TYPE = NAPARI_TIERS[0][0]
 
 # Bash snippet to find, format, and mount the secondary NVMe data volume.
 # On Nitro instances (r5a), /dev/sdf appears as /dev/nvme1n1.
@@ -153,8 +159,8 @@ def main() -> None:
     parser.add_argument(
         "--napari",
         action="store_true",
-        help=f"Launch a Napari viewer instance ({NAPARI_INSTANCE_TYPE}) with "
-             "GPU + local NVMe for fast slide loading",
+        help="Launch a Napari viewer instance with GPU + local NVMe for "
+             "fast slide loading (auto-selects instance size with --s3)",
     )
     parser.add_argument(
         "--raw",
@@ -179,9 +185,6 @@ def main() -> None:
         print("ERROR: --s3 must be an S3 URI (s3://...)", file=sys.stderr)
         sys.exit(1)
 
-    if not args.instance_type:
-        args.instance_type = NAPARI_INSTANCE_TYPE if args.napari else ANALYTICS_INSTANCE_TYPE
-
     if args.napari and args.storage != DEFAULT_STORAGE_GB:
         print("WARNING: --storage is ignored with --napari (no EBS data volume)", file=sys.stderr)
 
@@ -194,20 +197,46 @@ def main() -> None:
 
     dcv_password = os.environ.get("DCV_PASSWORD")
 
+    # For Napari + S3: pick the smallest instance whose NVMe fits the data,
+    # unless the user explicitly chose an instance type.
+    napari_nvme_total_gb = NAPARI_TIERS[0][1]
+    napari_nvme_usable_gb = NAPARI_TIERS[0][2]
+
     if args.s3:
         log(f"Checking S3 size of {args.s3} ...")
         s3_size = s3_total_size_gb(args.s3, region)
-        log(f"  S3 data size: {s3_size:.1f} GB (NVMe usable: ~{NAPARI_NVME_USABLE_GB} GB)")
-        if s3_size > NAPARI_NVME_USABLE_GB:
-            print(
-                f"ERROR: S3 data ({s3_size:.1f} GB) exceeds NVMe usable capacity "
-                f"(~{NAPARI_NVME_USABLE_GB} GB of {NAPARI_NVME_GB} GB total)",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+
         if s3_size == 0:
             print(f"ERROR: No objects found at {args.s3}", file=sys.stderr)
             sys.exit(1)
+
+        if not args.instance_type:
+            # Auto-select the smallest Napari tier that fits
+            selected = None
+            for instance_type, total_gb, usable_gb in NAPARI_TIERS:
+                if s3_size <= usable_gb:
+                    selected = (instance_type, total_gb, usable_gb)
+                    break
+            if selected is None:
+                max_tier = NAPARI_TIERS[-1]
+                print(
+                    f"ERROR: S3 data ({s3_size:.1f} GB) exceeds largest available "
+                    f"NVMe capacity (~{max_tier[2]} GB on {max_tier[0]})",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            args.instance_type, napari_nvme_total_gb, napari_nvme_usable_gb = selected
+            log(f"  S3 data size: {s3_size:.1f} GB → auto-selected {args.instance_type} "
+                f"(NVMe: ~{napari_nvme_usable_gb} GB usable of {napari_nvme_total_gb} GB)")
+        else:
+            # User chose a specific instance type — validate against the
+            # default tier (we can't know arbitrary instance NVMe sizes).
+            log(f"  S3 data size: {s3_size:.1f} GB (user-selected {args.instance_type})")
+            log(f"  WARNING: Cannot verify NVMe capacity for custom instance type. "
+                "Ensure it has enough local storage.")
+
+    if not args.instance_type:
+        args.instance_type = NAPARI_DEFAULT_INSTANCE_TYPE if args.napari else ANALYTICS_INSTANCE_TYPE
 
     # Detect current git branch so the instance clones the right code
     try:
@@ -228,11 +257,18 @@ def main() -> None:
         setup_script = AMI_SETUP_SCRIPT.read_text()
         user_data = setup_script.rstrip() + "\n\n" + mount_snippet
         if args.s3:
+            # rclone with :s3: backend uses the instance's IAM role automatically.
+            # --transfers=32 for parallel file downloads, --s3-no-head to skip
+            # unnecessary HEAD requests on each object.
+            rclone_src = ":s3:" + args.s3[len("s3://"):]
             s3_sync_snippet = f"""
 # ── Sync stitched slides from S3 to local NVMe ──────────────────────────
 echo "Syncing from {args.s3} to /mnt/local/stitched ..."
 sudo -u ubuntu mkdir -p /mnt/local/stitched
-sudo -u ubuntu aws s3 sync '{args.s3}' /mnt/local/stitched >> /var/log/ami-setup.log 2>&1
+sudo -u ubuntu rclone sync '{rclone_src}' /mnt/local/stitched \
+    --s3-provider AWS --s3-region {region} --s3-env-auth \
+    --transfers 32 --checkers 16 --s3-no-head \
+    --progress >> /var/log/ami-setup.log 2>&1
 echo "S3 sync complete. Files:" >> /var/log/ami-setup.log
 ls -lh /mnt/local/stitched >> /var/log/ami-setup.log 2>&1
 """
@@ -260,7 +296,7 @@ ls -lh /mnt/local/stitched >> /var/log/ami-setup.log 2>&1
     log(f"  AMI:            {ami_id}")
     log(f"  Instance type:  {args.instance_type}")
     if args.napari:
-        log("  Local NVMe:     ~225 GB (instance store, mounted at /mnt/local)")
+        log(f"  Local NVMe:     ~{napari_nvme_total_gb} GB (instance store, mounted at /mnt/local)")
         if args.s3:
             log(f"  S3 sync:        {args.s3} → /mnt/local/stitched")
     else:
@@ -332,7 +368,7 @@ ls -lh /mnt/local/stitched >> /var/log/ami-setup.log 2>&1
     print(f"  Instance ID:  {instance_id}")
     print(f"  Private IP:   {private_ip}")
     if args.napari:
-        print("  Local NVMe:   ~225 GB (auto-mounted at /mnt/local)")
+        print(f"  Local NVMe:   ~{napari_nvme_total_gb} GB (auto-mounted at /mnt/local)")
     else:
         print(f"  Data volume:  {args.storage} GB (auto-mounted at /mnt/cosmx)")
     print()
