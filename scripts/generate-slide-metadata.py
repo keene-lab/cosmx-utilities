@@ -101,6 +101,8 @@ def generate_metadata(
     rows = []
     total_read = 0
     seg_ids_seen = set()
+    # Support multiple comma-separated UUIDs
+    seg_id_set = set(s.strip() for s in seg_id.split(",")) if seg_id else None
 
     with gzip.open(input_path, "rt") as f:
         reader = csv.DictReader(f)
@@ -110,7 +112,7 @@ def generate_metadata(
             row_seg_id = row.get("cellSegmentationSetId", "").strip()
             seg_ids_seen.add(row_seg_id)
 
-            if seg_id is not None and row_seg_id != seg_id:
+            if seg_id_set is not None and row_seg_id not in seg_id_set:
                 continue
 
             cell_id = row.get("cell_id", "")
@@ -210,7 +212,14 @@ def main() -> None:
             print(f"  Generated: {stats['total_written']} cells, {stats['cell_types']} types")
             return
 
-        # Try each source to find one containing the target seg ID
+        # Multiple seg IDs may span multiple AtoMx runs (e.g. two-step
+        # resegmentation). Collect matching rows from ALL sources, then
+        # write a single merged _metadata.csv.
+        seg_ids_requested = set(s.strip() for s in args.seg_id.split(","))
+        seg_ids_found = set()
+        all_rows = []
+        all_seg_ids_seen = set()
+
         for run_name, s3_key in sources:
             print(f"  Trying: {run_name} ...")
             if not s3_download(s3, args.bucket, s3_key, local_gz):
@@ -220,21 +229,48 @@ def main() -> None:
             stats = generate_metadata(
                 local_gz, args.output, args.seg_id, args.cell_type_column,
             )
+            all_seg_ids_seen.update(stats["seg_ids_seen"])
 
             if stats["total_written"] > 0:
-                print(f"  Match found in: {run_name}")
-                print(f"    Source rows:   {stats['total_read']}")
-                print(f"    Matched rows:  {stats['total_written']}")
-                print(f"    Filtered out:  {stats['total_filtered']}")
-                print(f"    Cell types:    {stats['cell_types']}")
-                return
+                # Read back the rows we just wrote (generate_metadata wrote to output)
+                with open(args.output) as f:
+                    reader = csv.DictReader(f)
+                    new_rows = [(r["cell_ID"], r["cell_type"], r.get("hex_color", ""))
+                                for r in reader]
+                all_rows += new_rows
+                matched_ids = seg_ids_requested & stats["seg_ids_seen"]
+                seg_ids_found.update(matched_ids)
+                print(f"    Matched {stats['total_written']} cells "
+                      f"(seg IDs: {matched_ids})")
 
-            print(f"    No cells with seg ID {args.seg_id} (found: {stats['seg_ids_seen']})")
+                # If we've found all requested seg IDs, stop early
+                if seg_ids_found >= seg_ids_requested:
+                    break
+            else:
+                print(f"    No matching cells (seg IDs in file: {stats['seg_ids_seen']})")
 
-        # No source had matching cells
-        print(f"ERROR: No metadata source contains cells for segmentation ID {args.seg_id}", file=sys.stderr)
-        print(f"  Segmentation IDs found across all sources: {stats['seg_ids_seen']}", file=sys.stderr)
-        sys.exit(1)
+        if not all_rows:
+            print(f"ERROR: No metadata source contains cells for "
+                  f"segmentation IDs {seg_ids_requested}", file=sys.stderr)
+            print(f"  Seg IDs found across all sources: {all_seg_ids_seen}",
+                  file=sys.stderr)
+            sys.exit(1)
+
+        # Write merged output
+        # Rebuild color map across all collected cell types
+        cell_types = sorted(set(ct for _, ct, _ in all_rows if ct))
+        color_map = {ct: deterministic_color(ct) for ct in cell_types}
+
+        os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
+        with open(args.output, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["cell_ID", "cell_type", "hex_color"])
+            for cell_id, cell_type, _ in all_rows:
+                hex_color = color_map.get(cell_type, "")
+                writer.writerow([cell_id, cell_type, hex_color])
+
+        print(f"  Merged metadata: {len(all_rows)} cells, {len(cell_types)} types "
+              f"from {len(seg_ids_found)} segmentation(s)")
 
 
 if __name__ == "__main__":
