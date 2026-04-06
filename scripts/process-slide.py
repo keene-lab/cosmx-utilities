@@ -386,10 +386,122 @@ def detect_segmentation(ctx: SlideContext) -> tuple[str, str]:
     return _detect_highest_version(ctx)
 
 
+def _seg_version(dirname: str) -> int:
+    """Extract the numeric version suffix from a Segmentation_* directory name."""
+    m = re.search(r"_(\d+)$", dirname)
+    return int(m.group(1)) if m else 0
+
+
+def _seg_uuid(dirname: str) -> str:
+    """Extract the UUID from a Segmentation_* directory name."""
+    uuid = re.sub(r"^Segmentation_", "", dirname)
+    return re.sub(r"_\d+$", "", uuid)
+
+
+def _list_seg_fovs(ctx: SlideContext, seg_dir: str) -> set[int]:
+    """List which FOV numbers a Segmentation_* subdir contains (via S3)."""
+    prefix = f"{ctx.slide_base_path}/CellStatsDir/{seg_dir}/"
+    fov_dirs = s3_ls_prefixes(ctx.bucket, prefix)
+    fovs = set()
+    for d in fov_dirs:
+        m = re.match(r"FOV(\d+)$", d)
+        if m:
+            fovs.add(int(m.group(1)))
+    return fovs
+
+
+def detect_all_segmentations(ctx: SlideContext) -> list[tuple[str, str]]:
+    """Detect the segmentation versions needed to cover all FOVs for this run.
+
+    Strategy:
+    1. Identify this run's primary segmentation via flatFiles metadata
+       (cellSegmentationSetId). This is the segmentation the run's analysis
+       was performed against.
+    2. Check if it covers all FOVs (using the original _001 as reference).
+    3. If not, fill gaps by working backward from the primary version through
+       older versions — never newer, since newer versions didn't exist when
+       this run's analysis was done.
+
+    Returns list of (celllabels_subdir, seg_uuid) tuples, ordered by
+    version descending (primary first). Returns [] if no Segmentation_*
+    subdirs exist.
+    """
+    cellstats_prefix = f"{ctx.slide_base_path}/CellStatsDir"
+    seg_dirs = s3_ls_prefixes(ctx.bucket, cellstats_prefix)
+    seg_dirs = [d for d in seg_dirs if d.startswith("Segmentation_")]
+    if not seg_dirs:
+        return []
+
+    # Find this run's primary segmentation
+    primary_seg_id = _read_seg_id_from_flatfiles(ctx)
+    if not primary_seg_id:
+        log("  WARNING: Could not read cellSegmentationSetId from flatFiles")
+        return _detect_highest_version_as_list(ctx, seg_dirs)
+
+    primary_dir = _find_seg_subdir_by_uuid(ctx, primary_seg_id)
+    if not primary_dir:
+        log(f"  WARNING: No CellStatsDir subdir matches UUID {primary_seg_id}")
+        return _detect_highest_version_as_list(ctx, seg_dirs)
+
+    primary_version = _seg_version(primary_dir)
+    log(f"  Primary segmentation: {primary_dir} (UUID: {primary_seg_id})")
+
+    # Reference FOVs from the original segmentation (lowest version = all FOVs)
+    seg_dirs_sorted = sorted(seg_dirs, key=_seg_version)
+    original_dir = seg_dirs_sorted[0]
+    all_fovs = _list_seg_fovs(ctx, original_dir)
+    log(f"  Total FOVs in slide: {len(all_fovs)} (from {original_dir})")
+
+    # Check primary coverage
+    primary_fovs = _list_seg_fovs(ctx, primary_dir)
+    if primary_fovs >= all_fovs:
+        log(f"  {primary_dir}: covers all {len(all_fovs)} FOVs")
+        return [(primary_dir, primary_seg_id)]
+
+    # Primary doesn't cover all FOVs — fill gaps from older versions
+    selected = [(primary_dir, primary_seg_id)]
+    covered_fovs = set(primary_fovs)
+    log(f"  {primary_dir}: {len(primary_fovs)} FOVs "
+        f"({len(covered_fovs)}/{len(all_fovs)} covered)")
+
+    # Only consider versions older than the primary, newest first
+    older_dirs = [d for d in seg_dirs if _seg_version(d) < primary_version]
+    older_dirs.sort(key=_seg_version, reverse=True)
+
+    for dirname in older_dirs:
+        if covered_fovs >= all_fovs:
+            break
+        fovs = _list_seg_fovs(ctx, dirname)
+        new_fovs = fovs - covered_fovs
+        if new_fovs:
+            selected.append((dirname, _seg_uuid(dirname)))
+            covered_fovs.update(new_fovs)
+            log(f"  {dirname}: {len(new_fovs)} new FOVs "
+                f"({len(covered_fovs)}/{len(all_fovs)} covered)")
+        else:
+            log(f"  {dirname}: skipped (all {len(fovs)} FOVs already covered)")
+
+    if covered_fovs < all_fovs:
+        missing = all_fovs - covered_fovs
+        log(f"  WARNING: {len(missing)} FOVs still uncovered: {sorted(missing)[:20]}...")
+
+    return selected
+
+
+def _detect_highest_version_as_list(
+    ctx: SlideContext, seg_dirs: list[str],
+) -> list[tuple[str, str]]:
+    """Fallback: return the highest-version segmentation as a single-element list."""
+    result = _detect_highest_version(ctx)
+    if result[0]:
+        return [result]
+    return []
+
+
 # ── Step 1: Download slide data ────────────────────────────────────────────
 
 
-def download_slide(ctx: SlideContext, celllabels_subdir: str, dryrun: bool = False) -> str:
+def download_slide(ctx: SlideContext, celllabels_subdirs: str, dryrun: bool = False) -> str:
     """Download only the files needed for processing. Returns the AnalysisResults subdir name."""
     # CellStatsDir: CellLabels TIFs + Morphology2D images only
     s3_sync(
@@ -402,15 +514,19 @@ def download_slide(ctx: SlideContext, celllabels_subdir: str, dryrun: bool = Fal
         dryrun=dryrun,
     )
 
-    # Selected segmentation version's CellLabels only
-    if celllabels_subdir:
+    # Selected segmentation version(s)' CellLabels
+    if celllabels_subdirs:
+        includes = []
+        for subdir in celllabels_subdirs.split(","):
+            subdir = subdir.strip()
+            includes += [
+                f"{subdir}/FOV*/CellLabels_F*.tif",
+                f"{subdir}/FOV*/CellLabels_F*.TIF",
+            ]
         s3_sync(
             ctx.s3("CellStatsDir/"), str(ctx.work_dir / "CellStatsDir/"),
             exclude="*",
-            includes=[
-                f"{celllabels_subdir}/FOV*/CellLabels_F*.tif",
-                f"{celllabels_subdir}/FOV*/CellLabels_F*.TIF",
-            ],
+            includes=includes,
             dryrun=dryrun,
         )
 
@@ -441,15 +557,15 @@ def download_slide(ctx: SlideContext, celllabels_subdir: str, dryrun: bool = Fal
 # ── Step 2: Stitch images ──────────────────────────────────────────────────
 
 
-def stitch_images(ctx: SlideContext, celllabels_subdir: str) -> None:
+def stitch_images(ctx: SlideContext, celllabels_subdirs: str) -> None:
     cmd = [
         "uv", "run", "stitch-images",
         "-i", str(ctx.work_dir / "CellStatsDir"),
         "-f", str(ctx.work_dir / "RunSummary"),
         "-o", str(ctx.work_dir / "output"),
     ]
-    if celllabels_subdir:
-        cmd += ["--celllabels-subdir", celllabels_subdir]
+    if celllabels_subdirs:
+        cmd += ["--celllabels-subdir", celllabels_subdirs]
     run(cmd)
 
 
@@ -468,7 +584,7 @@ def read_targets(ctx: SlideContext, analysis_subdir: str) -> None:
 # ── Step 4: Generate metadata CSV ──────────────────────────────────────────
 
 
-def generate_metadata(ctx: SlideContext, seg_uuid: str) -> None:
+def generate_metadata(ctx: SlideContext, seg_uuids: list[str]) -> None:
     script_dir = Path(__file__).resolve().parent
     metadata_script = script_dir / "generate-slide-metadata.py"
     if not metadata_script.exists():
@@ -481,8 +597,8 @@ def generate_metadata(ctx: SlideContext, seg_uuid: str) -> None:
         "--slide-name", ctx.slide_name,
         "--output", str(ctx.work_dir / "output" / "_metadata.csv"),
     ]
-    if seg_uuid:
-        cmd += ["--seg-id", seg_uuid]
+    if seg_uuids:
+        cmd += ["--seg-id", ",".join(seg_uuids)]
     run(cmd)
 
 
@@ -545,23 +661,24 @@ def process_slide(
 
     try:
         if seg_version_override:
-            celllabels_subdir = seg_version_override
-            seg_uuid = re.sub(r"^Segmentation_", "", celllabels_subdir)
-            seg_uuid = re.sub(r"_\d+$", "", seg_uuid)
-            log(f"  Using segmentation override: {celllabels_subdir}")
+            celllabels_subdirs = seg_version_override
+            seg_uuids = [_seg_uuid(s.strip()) for s in celllabels_subdirs.split(",")]
+            log(f"  Using segmentation override: {celllabels_subdirs}")
         else:
             bench.failed_step = "detect_segmentation"
-            log(f"[{now_iso()}] Detecting segmentation version (DuckDB -> S3) ...")
-            celllabels_subdir, seg_uuid = detect_segmentation(ctx)
-            if celllabels_subdir:
-                log(f"  Matched segmentation: {celllabels_subdir}")
-                log(f"  Segmentation UUID:    {seg_uuid}")
+            log(f"[{now_iso()}] Detecting segmentation versions ...")
+            segmentations = detect_all_segmentations(ctx)
+            if segmentations:
+                celllabels_subdirs = ",".join(s for s, _ in segmentations)
+                seg_uuids = [uuid for _, uuid in segmentations]
             else:
-                log("  No segmentation manifests found, using base CellStatsDir")
+                celllabels_subdirs = ""
+                seg_uuids = []
+                log("  No Segmentation_* subdirs found, using base CellStatsDir")
 
         bench.start("download")
         log(f"[{now_iso()}] Downloading slide data ...")
-        analysis_subdir = download_slide(ctx, celllabels_subdir, dryrun=whatif)
+        analysis_subdir = download_slide(ctx, celllabels_subdirs, dryrun=whatif)
         bench.end("download")
         dur = bench._duration_seconds("download")
         log(f"[{now_iso()}] Download complete ({dur}s)")
@@ -575,7 +692,7 @@ def process_slide(
         else:
             bench.start("stitch")
             log(f"[{now_iso()}] Stitching images ...")
-            stitch_images(ctx, celllabels_subdir)
+            stitch_images(ctx, celllabels_subdirs)
             bench.end("stitch")
             log(f"[{now_iso()}] Stitch complete ({bench._duration_seconds('stitch')}s)")
 
@@ -587,7 +704,7 @@ def process_slide(
 
             bench.start("metadata")
             log(f"[{now_iso()}] Generating metadata CSV ...")
-            generate_metadata(ctx, seg_uuid)
+            generate_metadata(ctx, seg_uuids)
             bench.end("metadata")
             log(f"[{now_iso()}] Metadata complete ({bench._duration_seconds('metadata')}s)")
 

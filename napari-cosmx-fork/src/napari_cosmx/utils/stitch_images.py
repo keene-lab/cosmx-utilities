@@ -69,18 +69,43 @@ def main(args_list=None):
     # Read FOV locations file
     fov_offsets = stitch.offsets(args.offsetsdir)
 
-    labels_search_dir = args.inputdir
-    if args.celllabels_subdir:
-        labels_search_dir = os.path.join(args.inputdir, args.celllabels_subdir)
-        if not os.path.isdir(labels_search_dir):
-            print(f"ERROR: --celllabels-subdir not found: {labels_search_dir}")
-            sys.exit(1)
-        print(f"Using CellLabels from: {args.celllabels_subdir}")
-
+    # Discover CellLabels files. When --celllabels-subdir is given (one or
+    # more comma-separated Segmentation_* dirs), search those first, then
+    # fall back to base FOV*/ labels for any remaining FOVs.
     labels_res = []
-    for root, dirs, files in os.walk(labels_search_dir):
-        labels_res += [os.path.join(root, f) for f in files
-            if re.match(r"CELLLABELS_F[0-9]+\.TIF", f.upper())]
+    if args.celllabels_subdir:
+        covered_fovs = set()
+        subdirs = [s.strip() for s in args.celllabels_subdir.split(",")]
+        for subdir in subdirs:
+            search_dir = os.path.join(args.inputdir, subdir)
+            if not os.path.isdir(search_dir):
+                print(f"ERROR: --celllabels-subdir not found: {search_dir}")
+                sys.exit(1)
+            subdir_labels = []
+            for root, dirs, files in os.walk(search_dir):
+                subdir_labels += [os.path.join(root, f) for f in files
+                    if re.match(r"CELLLABELS_F[0-9]+\.TIF", f.upper())]
+            # Only add FOVs not already covered by a previous subdir
+            new = [f for f in subdir_labels if get_fov_number(f) not in covered_fovs]
+            covered_fovs.update(get_fov_number(f) for f in new)
+            labels_res += new
+            print(f"  {subdir}: {len(new)} FOVs")
+
+        # Fall back to base FOV*/ labels for any remaining FOVs
+        base_labels = []
+        for root, dirs, files in os.walk(args.inputdir):
+            dirs[:] = [d for d in dirs if not d.startswith("Segmentation_")]
+            base_labels += [os.path.join(root, f) for f in files
+                if re.match(r"CELLLABELS_F[0-9]+\.TIF", f.upper())]
+        fallback = [f for f in base_labels if get_fov_number(f) not in covered_fovs]
+        if fallback:
+            print(f"  Base CellLabels (fallback): {len(fallback)} FOVs")
+        labels_res += fallback
+        print(f"Using CellLabels from: {', '.join(subdirs)} ({len(labels_res)} total FOVs)")
+    else:
+        for root, dirs, files in os.walk(args.inputdir):
+            labels_res += [os.path.join(root, f) for f in files
+                if re.match(r"CELLLABELS_F[0-9]+\.TIF", f.upper())]
 
     # Check input directory for images and get image dimensions
     im_shape = None
