@@ -109,8 +109,15 @@ class Gemini:
             self._proteins = [s.replace(r'.zarr', '') for s in self.grp['protein'].group_keys()]
             if 'CosMx' in self.grp['protein'].attrs:
                 self.expr_scale = self.grp['protein'].attrs['CosMx']['scale']
-        self.name = self.adata.uns['name'] if (self.adata is not None) and ('name' in self.adata.uns) else \
-            os.path.basename(os.path.normpath(self.folder))
+        if (self.adata is not None) and ('name' in self.adata.uns):
+            self.name = self.adata.uns['name']
+        else:
+            folder = os.path.normpath(self.folder)
+            slide = os.path.basename(folder)
+            parent = os.path.basename(os.path.dirname(folder))
+            # Strip trailing date/number suffixes (e.g. "22426_06_04_2026_12_30_21_218")
+            short_parent = re.sub(r'\d[\d_]*$', '', parent).rstrip('_')
+            self.name = f"{short_parent}/{slide}" if short_parent else slide
 
         if self.adata is None:
             # search for *_metadata.csv
