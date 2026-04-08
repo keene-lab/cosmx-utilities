@@ -140,6 +140,7 @@ class Gemini:
             self.viewer = napari.Viewer()
         self.viewer.layers.events.removed.connect(self._layer_removed)
         self.update_console()
+        self.viewer.title = self.name
         self.viewer.scale_bar.visible = True
         self.viewer.scale_bar.unit = "mm"
         if any("labels" in x for x in self.grp.group_keys()):
