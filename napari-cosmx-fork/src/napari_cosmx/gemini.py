@@ -110,7 +110,7 @@ class Gemini:
             if 'CosMx' in self.grp['protein'].attrs:
                 self.expr_scale = self.grp['protein'].attrs['CosMx']['scale']
         self.name = self.adata.uns['name'] if (self.adata is not None) and ('name' in self.adata.uns) else \
-            os.path.basename(self.folder)
+            os.path.basename(os.path.normpath(self.folder))
 
         if self.adata is None:
             # search for *_metadata.csv
