@@ -23,6 +23,7 @@ dependencies = [
     "pyarrow>=17.0.0",
     "matplotlib>=3.7.5",
     "seaborn>=0.13.2",
+    "adjusttext>=1.3.0",
 ]
 
 [project.optional-dependencies]
