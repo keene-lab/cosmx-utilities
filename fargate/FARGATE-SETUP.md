@@ -84,12 +84,12 @@ Before registering these task definitions:
 3. **Docker Images**:
    ```bash
    # Build and push headless image (for process-slide tasks)
-   docker build --target headless -t ekillingbeck/cosmx-utilities:headless-latest .
-   docker push ekillingbeck/cosmx-utilities:headless-latest
+   docker build --target headless -t ghcr.io/keene-lab/cosmx-utilities:headless-latest .
+   docker push ghcr.io/keene-lab/cosmx-utilities:headless-latest
 
    # Build and push metadata-generator image (lightweight DuckDB-based)
-   docker build --target metadata-generator -t ekillingbeck/cosmx-utilities:metadata-generator-latest .
-   docker push ekillingbeck/cosmx-utilities:metadata-generator-latest
+   docker build --target metadata-generator -t ghcr.io/keene-lab/cosmx-utilities:metadata-generator-latest .
+   docker push ghcr.io/keene-lab/cosmx-utilities:metadata-generator-latest
    ```
 
 ## Configuration
@@ -119,7 +119,7 @@ At runtime, the bucket and slide path are passed as CLI arguments to `process-sl
 ### Networking
 
 Tasks run in the **cosmx VPC** on private subnets with a NAT Gateway for internet access.
-`assignPublicIp=DISABLED` — the NAT Gateway handles outbound traffic (S3, Docker Hub, CloudWatch).
+`assignPublicIp=DISABLED` — the NAT Gateway handles outbound traffic (S3, GHCR, CloudWatch).
 
 See `fargate/.env` for the specific subnet and security group IDs.
 
@@ -300,7 +300,7 @@ Key metrics to watch in CloudWatch:
 ## Troubleshooting
 
 ### Task fails to start
-- Check execution role has permission to pull Docker image from ECR/Docker Hub
+- Check execution role has permission to pull Docker image from GHCR
 - Verify log group exists in CloudWatch Logs
 - Ensure security group allows outbound HTTPS (port 443 for ECR and S3)
 
