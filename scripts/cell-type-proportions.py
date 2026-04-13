@@ -30,17 +30,20 @@ def main():
     df2 = df2[df2["cell_type"].notna() & (df2["cell_type"] != "")]
     df2 = df2[df2["fov"].isin(SLIDE_2_FOVS)]
 
-    # Compute proportions
+    # Compute mean cells per FOV for each cell type
+    n_fovs_1 = df1["fov"].nunique()
+    n_fovs_2 = df2["fov"].nunique()
+
     counts1 = df1["cell_type"].value_counts()
     counts2 = df2["cell_type"].value_counts()
-    pct1 = counts1 / counts1.sum() * 100
-    pct2 = counts2 / counts2.sum() * 100
+    density1 = counts1 / n_fovs_1
+    density2 = counts2 / n_fovs_2
 
     # Union of cell types, sorted alphabetically
-    all_types = sorted(set(pct1.index) | set(pct2.index))
+    all_types = sorted(set(density1.index) | set(density2.index))
 
-    props1 = [pct1.get(ct, 0) for ct in all_types]
-    props2 = [pct2.get(ct, 0) for ct in all_types]
+    vals1 = [density1.get(ct, 0) for ct in all_types]
+    vals2 = [density2.get(ct, 0) for ct in all_types]
 
     # ── Plot ───────────────────────────────────────────────────────────────
     x = np.arange(len(all_types))
@@ -48,29 +51,29 @@ def main():
 
     fig, ax = plt.subplots(figsize=(14, 6))
 
-    bars1 = ax.bar(x - bar_width / 2, props1, bar_width,
-                   label=f"{SLIDE_1_LABEL} (n = {len(df1):,})",
+    bars1 = ax.bar(x - bar_width / 2, vals1, bar_width,
+                   label=f"{SLIDE_1_LABEL} ({n_fovs_1} FOVs, {len(df1):,} cells)",
                    color=SLIDE_1_COLOR, edgecolor="white", linewidth=0.5)
-    bars2 = ax.bar(x + bar_width / 2, props2, bar_width,
-                   label=f"{SLIDE_2_LABEL} (n = {len(df2):,})",
+    bars2 = ax.bar(x + bar_width / 2, vals2, bar_width,
+                   label=f"{SLIDE_2_LABEL} ({n_fovs_2} FOVs, {len(df2):,} cells)",
                    color=SLIDE_2_COLOR, edgecolor="white", linewidth=0.5)
 
-    # Add percentage labels above bars
+    # Add value labels above bars
     for bars in [bars1, bars2]:
         for bar in bars:
             height = bar.get_height()
-            if height >= 0.5:
+            if height >= 1:
                 ax.text(
-                    bar.get_x() + bar.get_width() / 2, height + 0.3,
-                    f"{height:.1f}%",
+                    bar.get_x() + bar.get_width() / 2, height + 0.5,
+                    f"{height:.1f}",
                     ha="center", va="bottom", fontsize=7,
                 )
 
     ax.set_xticks(x)
     ax.set_xticklabels(all_types, rotation=45, ha="right", fontsize=9)
-    ax.set_ylabel("% of cells", fontsize=11)
-    ax.set_title("Cell type proportions by slide", fontsize=13)
-    ax.legend(fontsize=10)
+    ax.set_ylabel("Mean cells per FOV", fontsize=11)
+    ax.set_title("Cell type density by slide", fontsize=13)
+    ax.legend(fontsize=9)
 
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)

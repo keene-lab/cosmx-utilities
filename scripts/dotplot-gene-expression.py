@@ -7,6 +7,7 @@ Dot size  = fraction of cells expressing the gene (count > 0)
 Dot color = mean expression (transcript count) among expressing cells
 """
 
+import argparse
 import gzip
 import io
 import subprocess
@@ -51,6 +52,15 @@ SLIDE_2_LABEL = "Normal brain"
 SLIDE_2_FOVS = set(range(1, 49)) | set(range(199, 201)) | set(range(148, 198))
 
 CELL_TYPE_COLUMN = "RNA_RNA_Cell.Typing.InSituType.Allen.Brain_1_clusters"
+
+NEURONAL_TYPES = [
+    "Inhibitory.neuron.A",
+    "Inhibitory.neuron.B",
+    "Inhibitory.neuron.C",
+    "L2.3.neuron",
+    "L4.neuron",
+    "L6.neuron",
+]
 
 OUTPUT_PATH = "dotplot-gene-expression.png"
 
@@ -116,7 +126,18 @@ def compute_dotplot_stats(df):
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="CosMx dot plot of gene expression by cell type")
+    parser.add_argument(
+        "--neurons-only", action="store_true",
+        help="Restrict x-axis to neuronal cell types only",
+    )
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+
     print("Loading Slide 1 (all FOVs) ...")
     df1 = load_slide(SLIDE_1_EXPR, SLIDE_1_META)
     print(f"  {len(df1)} cells, {df1['cell_type'].nunique()} cell types")
@@ -132,6 +153,11 @@ def main():
     shared_types = sorted(
         set(stats1["cell_type"].unique()) & set(stats2["cell_type"].unique())
     )
+
+    if args.neurons_only:
+        shared_types = [ct for ct in shared_types if ct in NEURONAL_TYPES]
+        print(f"Filtering to neuronal types: {shared_types}")
+
     stats1 = stats1[stats1["cell_type"].isin(shared_types)]
     stats2 = stats2[stats2["cell_type"].isin(shared_types)]
 
@@ -205,12 +231,16 @@ def main():
         labelspacing=1.5,
     )
 
-    fig.suptitle(
-        "Gene expression by cell type across CosMx slides",
-        fontsize=12,
-    )
-    plt.savefig(OUTPUT_PATH, dpi=200, bbox_inches="tight")
-    print(f"\nSaved dot plot to {OUTPUT_PATH}")
+    title = "Gene expression by cell type across CosMx slides"
+    if args.neurons_only:
+        title = "Gene expression by neuronal subtype across CosMx slides"
+    fig.suptitle(title, fontsize=12)
+
+    output = OUTPUT_PATH
+    if args.neurons_only:
+        output = output.replace(".png", "-neurons.png")
+    plt.savefig(output, dpi=200, bbox_inches="tight")
+    print(f"\nSaved dot plot to {output}")
 
 
 if __name__ == "__main__":
