@@ -307,6 +307,7 @@ ls -lh /mnt/local/stitched >> /var/log/ami-setup.log 2>&1
     resource_tags = [
         {"Key": "Name", "Value": args.name},
         {"Key": "Project", "Value": PROJECT_TAG},
+        {"Key": "Purpose", "Value": "napari-viewer" if args.napari else "analytics"},
     ]
 
     block_devices = [
