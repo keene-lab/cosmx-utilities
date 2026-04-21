@@ -1,0 +1,54 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DescribeInstancesGlobal",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeInstances",
+        "ec2:DescribeInstanceStatus",
+        "ec2:DescribeTags"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "StopAndTerminateNapariInstancesOnly",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:StopInstances",
+        "ec2:TerminateInstances"
+      ],
+      "Resource": "arn:aws:ec2:*:*:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Purpose": "napari-viewer"
+        }
+      }
+    },
+    {
+      "Sid": "SSMPortForwardToNapariInstancesOnly",
+      "Effect": "Allow",
+      "Action": "ssm:StartSession",
+      "Resource": "arn:aws:ec2:*:*:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Purpose": "napari-viewer",
+          "ssm:DocumentARN": [
+            "arn:aws:ssm:*::document/AWS-StartPortForwardingSession",
+            "arn:aws:ssm:*::document/AWS-StartPortForwardingSessionToRemoteHost"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "SSMSessionLifecycle",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:TerminateSession",
+        "ssm:ResumeSession",
+        "ssm:DescribeSessions"
+      ],
+      "Resource": "arn:aws:ssm:*:*:session/${aws:username}-*"
+    }
+  ]
+}
