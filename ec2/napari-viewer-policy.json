@@ -2,19 +2,22 @@
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "DescribeInstancesGlobal",
+      "Sid": "VisualEditor0",
       "Effect": "Allow",
       "Action": [
         "ec2:DescribeInstances",
         "ec2:DescribeInstanceStatus",
+        "ec2:DescribeInstanceAttribute",
+        "ec2:DescribeInstanceTypes",
         "ec2:DescribeTags"
       ],
       "Resource": "*"
     },
     {
-      "Sid": "StopAndTerminateNapariInstancesOnly",
+      "Sid": "StartStopTerminateNapariOnly",
       "Effect": "Allow",
       "Action": [
+        "ec2:StartInstances",
         "ec2:StopInstances",
         "ec2:TerminateInstances"
       ],
