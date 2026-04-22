@@ -1,0 +1,23 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyDeleteExceptDeleterAndFargate",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": [
+        "s3:DeleteObject",
+        "s3:DeleteObjectVersion"
+      ],
+      "Resource": "arn:aws:s3:::keene-cosmx-data/*",
+      "Condition": {
+        "StringNotEquals": {
+          "aws:userid": [
+            "DELETER_ROLE_ID",
+            "FARGATE_ROLE_ID"
+          ]
+        }
+      }
+    }
+  ]
+}
